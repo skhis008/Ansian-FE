@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { Ride } from '#shared/types'
-import { RIDE_STATUS_LABELS } from '#shared/types'
+import type { Ride, RideStatus } from '#shared/types'
+import { RIDE_STATUS_LABELS, RIDE_TERMINAL_STATUSES } from '#shared/types'
 import { formatTime } from '#shared/utils/format'
 
 const props = defineProps<{ ride: Ride }>()
@@ -24,10 +24,13 @@ const currentIndex = computed(() => {
   return map[props.ride.status] ?? -1
 })
 
+// Backend mencatat `to_status`, bukan `status`, jadi pencocokan memakai
+// field itu. Kalau tetap `h.status`, hasilnya selalu `undefined` dan setiap
+// langkah timeline kehilangan keterangan waktunya tanpa error.
 const historyFor = (status: Ride['status']) =>
-  [...props.ride.status_histories].reverse().find(h => h.status === status)
+  [...props.ride.status_histories].reverse().find(h => h.to_status === status)
 
-const isTerminal = computed(() => ['cancelled', 'failed'].includes(props.ride.status))
+const isTerminal = computed(() => (RIDE_TERMINAL_STATUSES as readonly RideStatus[]).includes(props.ride.status))
 </script>
 
 <template>
@@ -39,7 +42,7 @@ const isTerminal = computed(() => ['cancelled', 'failed'].includes(props.ride.st
           Perjalanan {{ RIDE_STATUS_LABELS[ride.status] }}
         </p>
         <p class="mt-0.5 text-xs text-red-700">
-          {{ ride.status_histories[ride.status_histories.length - 1]?.note || 'Tidak ada driver yang tersedia.' }}
+          {{ ride.status_histories[ride.status_histories.length - 1]?.note || RIDE_STATUS_LABELS[ride.status] }}
         </p>
       </div>
     </div>
@@ -72,7 +75,7 @@ const isTerminal = computed(() => ['cancelled', 'failed'].includes(props.ride.st
             {{ step.label }}
           </p>
           <p v-if="historyFor(step.status)" class="mt-0.5 text-xs text-ink-500">
-            {{ formatTime(historyFor(step.status)!.created_at) }}
+            {{ formatTime(historyFor(step.status)!.at) }}
             <span v-if="historyFor(step.status)?.note"> · {{ historyFor(step.status)?.note }}</span>
           </p>
           <p v-else-if="i === currentIndex" class="mt-0.5 inline-flex items-center gap-1.5 text-xs font-medium text-brand-600">

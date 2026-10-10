@@ -22,7 +22,7 @@ watch([search, role, status], () => {
 
 const { data, pending, refresh } = await useAsyncData(
   'admin-users',
-  () => http.get<Paginated<User>>('/admin/users', { ...query, page: page.value, per_page: 15 }),
+  () => http.get<Paginated<User>>('/users', { ...query, page: page.value, per_page: 15 }),
   { watch: [query, page] },
 )
 
@@ -30,12 +30,12 @@ const rows = computed(() => data.value?.data ?? [])
 const meta = computed(() => data.value?.meta)
 
 const editing = ref<User | null>(null)
-const form = reactive({ name: '', email: '', phone: '', role: 'customer' as UserRole, status: 'active' })
+const form = reactive({ name: '', email: '', phone: '', role: 'user' as UserRole, status: 'active' })
 const saving = ref(false)
 const removing = ref<User | null>(null)
 
 const ROLE_TONES: Record<string, 'brand' | 'info' | 'purple'> = {
-  customer: 'brand',
+  user: 'brand',
   driver: 'info',
   admin: 'purple',
 }
@@ -58,7 +58,7 @@ async function save() {
   if (!editing.value) return
   saving.value = true
   try {
-    await http.patch(`/admin/users/${editing.value.id}`, { ...form })
+    await http.patch(`/users/${editing.value.id}`, { ...form })
     toast.success('Pengguna diperbarui.')
     editing.value = null
     await refresh()
@@ -73,7 +73,7 @@ async function confirmDelete() {
   if (!removing.value) return
   saving.value = true
   try {
-    await http.delete(`/admin/users/${removing.value.id}`)
+    await http.delete(`/users/${removing.value.id}`)
     toast.success('Pengguna dihapus.')
     removing.value = null
     await refresh()
@@ -105,7 +105,7 @@ async function confirmDelete() {
           class="h-10 rounded-xl border border-ink-200 bg-white px-3 text-[12.5px] font-medium text-ink-700 outline-none focus:border-brand-500"
         >
           <option value="">Semua peran</option>
-          <option value="customer">Pelanggan</option>
+          <option value="user">Pelanggan</option>
           <option value="driver">Driver</option>
           <option value="admin">Admin</option>
         </select>
@@ -153,7 +153,10 @@ async function confirmDelete() {
               </td>
               <td class="px-3 py-3 text-[12.5px] text-ink-600">{{ u.phone ?? '-' }}</td>
               <td class="px-3 py-3">
-                <UiBadge :tone="ROLE_TONES[u.role]" size="sm">{{ u.role }}</UiBadge>
+                <!-- `role_label` dari backend, bukan `role`. Nilai enum-nya `user` dan itu
+                     bukan bahasa manusia — memaparkannya membuat daftar pengguna
+                     terbaca seperti `user`, `admin`, `driver`. -->
+                <UiBadge :tone="ROLE_TONES[u.role]" size="sm">{{ u.role_label ?? u.role }}</UiBadge>
               </td>
               <td class="px-3 py-3">
                 <UiBadge :tone="STATUS_TONES[u.status]" size="sm" dot>{{ u.status }}</UiBadge>
@@ -204,7 +207,7 @@ async function confirmDelete() {
               v-model="form.role"
               class="h-10 w-full rounded-xl border border-ink-200 bg-white px-3 text-[13px] text-ink-800 outline-none focus:border-brand-500"
             >
-              <option value="customer">Pelanggan</option>
+              <option value="user">Pelanggan</option>
               <option value="driver">Driver</option>
               <option value="admin">Admin</option>
             </select>

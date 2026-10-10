@@ -17,13 +17,13 @@ const errors = ref<Record<string, string>>({})
 const form = reactive({ name: '', phone: '' })
 const pass = reactive({ current_password: '', password: '', password_confirmation: '' })
 
-const roleLabel = computed(() =>
-  ({ customer: 'Pelanggan', driver: 'Driver', admin: 'Administrator' })[auth.role ?? 'customer'],
+const roleLabel = computed(
+  () =>
+    ({ user: 'Pelanggan', driver: 'Driver', admin: 'Administrator' })[auth.role ?? 'user'],
 )
 
 function openEdit() {
   form.name = auth.user?.name ?? ''
-  form.phone = auth.user?.phone ?? ''
   errors.value = {}
   editOpen.value = true
 }
@@ -36,7 +36,7 @@ async function saveProfile() {
   }
   saving.value = true
   try {
-    await auth.updateProfile({ name: form.name, phone: form.phone })
+    await auth.updateProfile({ name: form.name })
     toast.success('Profil berhasil diperbarui.')
     editOpen.value = false
   } catch (e) {
@@ -55,7 +55,17 @@ async function savePassword() {
 
   changingPass.value = true
   try {
-    await http.patch('/auth/password', { ...pass })
+    // TODO backend: BE tidak punya endpoint ganti-password. Yang ada
+    // `PUT /users/{id}` yang menerima `password` + `password_confirmation` —
+    // dan TIDAK memeriksa `current_password`. Jadi kalau mock dimatikan, siapa pun
+    // yang memegang token bisa mengganti password tanpa mengetahui password lama.
+    // `current_password` tetap dikirim dan mock tetap memeriksanya; BE perlu
+    // aturan yang sama sebelum layar ini dianggap aman.
+    await http.put(`/users/${auth.user?.id}`, {
+      current_password: pass.current_password,
+      password: pass.password,
+      password_confirmation: pass.password_confirmation,
+    })
     toast.success('Password berhasil diubah.')
     passOpen.value = false
     Object.assign(pass, { current_password: '', password: '', password_confirmation: '' })
@@ -234,7 +244,12 @@ async function logout() {
     <UiModal :open="editOpen" title="Edit Profil" size="sm" @close="editOpen = false">
       <div class="space-y-4">
         <UiInput v-model="form.name" label="Nama lengkap" icon="user" :error="errors.name" />
-        <UiInput v-model="form.phone" label="Nomor WhatsApp" type="tel" icon="phone" :error="errors.phone" />
+        <!--
+          Input nomor WhatsApp DIHAPUS dari form edit. Tabel `users` di backend
+          belum punya kolom telepon, jadi isian itu akan diterima form lalu
+          dibuang server tanpa pesan — dan orang akan mengira nomornya tersimpan.
+          Kolomnya kembali begitu `phone` benar-benar ada di backend.
+        -->
       </div>
       <template #footer>
         <UiButton variant="ghost" @click="editOpen = false">Batal</UiButton>

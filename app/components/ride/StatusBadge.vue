@@ -10,8 +10,13 @@ const config: Record<RideStatus, { tone: 'brand' | 'gray' | 'success' | 'warning
   driver_arrived: { tone: 'purple', icon: 'map-pin' },
   in_progress: { tone: 'brand', icon: 'navigation' },
   completed: { tone: 'success', icon: 'check' },
-  cancelled: { tone: 'danger', icon: 'x' },
-  failed: { tone: 'danger', icon: 'alert-triangle' },
+  // Pembatalan dan kegagalan dipisahkan ikon supaya "kamu yang batalin" tidak
+  // tampil sama dengan "tidak ada driver". Kalimatnya sudah berbeda lewat
+  // RIDE_STATUS_LABELS; ikon membedakan tanpa harus dibaca.
+  passenger_cancelled: { tone: 'danger', icon: 'x' },
+  driver_cancelled: { tone: 'danger', icon: 'x' },
+  no_driver_found: { tone: 'danger', icon: 'alert-triangle' },
+  rejected: { tone: 'gray', icon: 'rotate-ccw' },
 }
 </script>
 

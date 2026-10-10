@@ -1,13 +1,12 @@
 import type { H3Event } from 'h3'
 import { createError } from 'h3'
-import type { AuthSession, User } from '#shared/types'
+import type { User } from '#shared/types'
 import {
   authUser,
   clearAuthSession,
   delay,
   emailRule,
   minRule,
-  optionalUser,
   readPayload,
   readSession,
   readDevice,
@@ -19,11 +18,9 @@ import {
   db,
 } from '../api'
 import {
-  activeRideForUser,
   buildChartSeries,
   driverByUserId,
   nowIso,
-  rideWithRelations,
   type OtpChallenge,
 } from './db'
 
@@ -35,7 +32,7 @@ function issueToken(userId: number): string {
   return `ans_mock_${userId}_${Math.random().toString(36).slice(2, 12)}`
 }
 
-function sessionFor(user: User, event: H3Event): AuthSession {
+function sessionFor(user: User, event: H3Event): { token: string; user: User } {
   const token = issueToken(user.id)
   writeSession(event, { userId: user.id, token })
   return { token, user }
@@ -104,7 +101,7 @@ export async function register(event: H3Event) {
     phone: (v: unknown) =>
       typeof v === 'string' && v.replace(/\D/g, '').length >= 9 ? null : 'Nomor HP tidak valid.',
     password: minRule(8, 'Password'),
-    role: (v: unknown) => (v === 'customer' || v === 'driver' ? null : 'Role tidak valid.'),
+    role: (v: unknown) => (v === 'user' || v === 'driver' ? null : 'Role tidak valid.'),
     ...(body.role === 'driver'
       ? {
           student_id: required('NIM'),
@@ -250,8 +247,8 @@ export async function verifyOtp(event: H3Event) {
   return resource(sessionFor(user, event))
 }
 
-/** POST /api/v1/auth/otp/resend — kode baru, throttle 60 detik */
-export async function resendOtp(event: H3Event) {
+/** POST /api/v1/auth/otp/request — kode baru, throttle 60 detik */
+export async function requestOtp(event: H3Event) {
   await delay(300)
   const body = await readPayload(event)
   validate(body, { challenge_id: required('Challenge') })
@@ -290,108 +287,54 @@ export async function me(event: H3Event) {
   })
 }
 
-/** PATCH /api/v1/auth/profile */
-export async function updateProfile(event: H3Event) {
-  const user = authUser(event)
-  const body = await readPayload(event)
-  validate(body, { name: (v: unknown) => (typeof v === 'string' && v.trim().length < 3 ? 'Nama minimal 3 karakter.' : null) })
-
-  if (body.name) user.name = String(body.name).trim()
-  if (body.phone) user.phone = String(body.phone)
-  if (body.avatar_url !== undefined) user.avatar_url = body.avatar_url || null
-  user.updated_at = nowIso()
-
-  if (user.role === 'driver' && body.vehicle) {
-    const profile = driverByUserId(user.id)
-    if (profile) {
-      const target = db.drivers.find(d => d.id === profile.id)!
-      target.vehicle_type = body.vehicle.vehicle_type ?? target.vehicle_type
-      target.vehicle_plate = body.vehicle.vehicle_plate ?? target.vehicle_plate
-      target.vehicle_color = body.vehicle.vehicle_color ?? target.vehicle_color
-      target.vehicle_model = body.vehicle.vehicle_model ?? target.vehicle_model
-    }
-  }
-  return resource(user)
-}
-
-/** PATCH /api/v1/auth/password */
-export async function updatePassword(event: H3Event) {
-  authUser(event)
-  const body = await readPayload(event)
-  validate(body, {
-    current_password: required('Password saat ini'),
-    password: minRule(8, 'Password baru'),
-  })
-  const user = authUser(event)
-  const stored = db.passwords.get(user.email) ?? 'password'
-  if (body.current_password !== stored) {
-    throw createError({
-      statusCode: 422,
-      data: {
-        message: 'Password saat ini salah.',
-        errors: { current_password: ['Password saat ini salah.'] },
-      },
-    })
-  }
-  db.passwords.set(user.email, String(body.password))
-  return resource({ message: 'Password berhasil diperbarui.' })
-}
-
 /** GET /api/v1/auth/sessions */
 export async function sessions(event: H3Event) {
   const session = readSession(event)
   return resource({ active: Boolean(session), token_hint: session?.token.slice(-6) ?? null })
 }
 
-/** GET /api/v1/rides/active — dipanggil setelah SSR untuk tau ada perjalanan berjalan */
-export async function activeRide(event: H3Event) {
-  const user = optionalUser(event)
-  if (!user) return resource(null)
-  const ride = activeRideForUser(user.id, user.role === 'driver' ? 'driver' : 'customer')
-  return resource(ride ? rideWithRelations(ride) : null)
-}
-
 /** GET /api/v1/me/summary — ringkasan sesuai role untuk halaman depan */
 export async function homeSummary(event: H3Event) {
   const user = authUser(event)
-  if (user.role === 'customer') {
+  const today = new Date().toISOString().slice(0, 10)
+  const isCancelled = (s: string) => s === 'passenger_cancelled' || s === 'driver_cancelled' || s === 'no_driver_found'
+  const isActive = (s: string) => s === 'searching' || s === 'driver_assigned' || s === 'driver_arrived' || s === 'in_progress'
+
+  if (user.role === 'user') {
     const rides = db.rides.filter(r => r.customer_id === user.id)
-    const today = new Date().toISOString().slice(0, 10)
+    const completed = rides.filter(r => r.status === 'completed')
     return resource({
+      role: 'user' as const,
       total_rides: rides.length,
+      active_rides: rides.filter(r => isActive(r.status)).length,
+      completed_rides: completed.length,
+      cancelled_rides: rides.filter(r => isCancelled(r.status)).length,
       rides_today: rides.filter(r => r.created_at.slice(0, 10) === today).length,
-      total_spent: rides.filter(r => r.status === 'completed').reduce((a, r) => a + r.fare, 0),
-      points: 1240,
+      total_spent: completed.reduce((a, r) => a + r.fare, 0),
+      currency: 'IDR',
       series: buildChartSeries(7),
     })
   }
+
+  /*
+   * Tidak ada `points` dan tidak ada `online_hours`: keduanya tidak ada di
+   * backend. `points: 1240` dulu dibuat-buat supaya kartunya terlihat penuh,
+   * dan `online_hours` tidak pernah dihitung dari apa pun.
+   */
   const profile = driverByUserId(user.id)
   return resource({
+    role: 'driver' as const,
     status: profile?.status ?? 'offline',
+    // Mock tidak punya sakelar `is_available` terpisah seperti backend; status
+    // adalah satu-satunya penanda yang ada di sini.
+    is_available: (profile?.status ?? 'offline') !== 'offline',
+    total_rides: profile?.total_rides ?? 0,
+    active_rides: db.rides.filter(r => r.driver_id !== null && r.driver_id === profile?.id && isActive(r.status)).length,
+    rating: profile?.rating ?? null,
     earnings_today: profile?.earnings_today ?? 0,
     earnings_month: profile?.earnings_month ?? 0,
-    total_rides: profile?.total_rides ?? 0,
-    rating: profile?.rating ?? 5,
-    online_hours: profile?.online_hours ?? 0,
-    verification: profile?.verification ?? 'pending',
+    collected_cash_month: Math.round((profile?.earnings_month ?? 0) * 0.4),
+    currency: 'IDR',
     series: buildChartSeries(7),
   })
-}
-
-/** GET /api/v1/me/activity — aktivitas terakhir untuk timeline dashboard */
-export async function activity(event: H3Event) {
-  const user = authUser(event)
-  const rides = db.rides
-    .filter(r => (user.role === 'customer' ? r.customer_id === user.id : r.driver_id !== null && db.drivers.find(d => d.id === r.driver_id)?.user_id === user.id))
-    .slice(0, 8)
-    .map(r => ({
-      id: r.id,
-      ride_code: r.ride_code,
-      status: r.status,
-      fare: r.fare,
-      pickup_name: r.pickup.place_name,
-      destination_name: r.destination.place_name,
-      created_at: r.created_at,
-    }))
-  return resource(rides)
 }

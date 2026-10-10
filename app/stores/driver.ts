@@ -58,8 +58,11 @@ export const useDriverStore = defineStore('driver', {
       if (!this.profile) return
       this.busy = true
       try {
-        const next = this.profile.status === 'offline' ? 'online' : 'offline'
-        const res = await http.post<{ data: DriverProfile }>('/drivers/me/status', { status: next })
+        // Backend menerima `is_available`, bukan string status. Status yang boleh
+        // dipasang driver untuk dirinya sendiri juga cara membatalkan suspendu,
+        // jadi layar ini hanya boleh mengirim flag itu.
+        const nextAvailable = this.profile.status === 'offline'
+        const res = await http.put<{ data: DriverProfile }>('/driver/profile/availability', { is_available: nextAvailable })
         this.sync(res.data)
         return res.data
       } finally {
@@ -74,7 +77,7 @@ export const useDriverStore = defineStore('driver', {
       }
       this.loadingJobs = true
       try {
-        const res = await http.get<{ data: DriverJob[] }>('/drivers/jobs')
+        const res = await http.get<{ data: DriverJob[] }>('/driver/rides/nearby')
         this.jobs = res.data
       } finally {
         this.loadingJobs = false
@@ -102,7 +105,7 @@ export const useDriverStore = defineStore('driver', {
     async acceptJob(rideId: number) {
       this.busy = true
       try {
-        const res = await http.post<{ data: Ride }>(`/drivers/jobs/${rideId}/accept`)
+        const res = await http.post<{ data: Ride }>(`/rides/${rideId}/accept`)
         this.jobs = this.jobs.filter(j => j.ride_id !== rideId)
         if (this.profile) this.profile.status = 'busy'
         return res.data
@@ -120,7 +123,7 @@ export const useDriverStore = defineStore('driver', {
     /** Kirim posisi driver saat ini ke backend + channel realtime */
     async updateLocation(lat: number, lng: number) {
       this.liveLocation = { lat, lng }
-      const res = await http.post<{ data: { lat: number; lng: number } }>('/drivers/me/location', { lat, lng })
+      const res = await http.put<{ data: { lat: number; lng: number } }>('/driver/profile/location', { lat, lng })
       if (this.profile) {
         this.profile.lat = res.data.lat
         this.profile.lng = res.data.lng
@@ -128,6 +131,16 @@ export const useDriverStore = defineStore('driver', {
       return res.data
     },
 
+    /**
+     * Data kendaraan driver.
+     *
+     * TODO backend: belum ada padanan di BE dan tidak bisa dipetakan dengan
+     * rename. BE memisahkan kendaraan jadi baris sendiri lewat
+     * `POST /api/v1/driver/vehicles`, dan bentuknya berbeda: `vehicle_type_id`
+     * (id katalog, bukan string `motorcycle`), `plate_number`, `brand`, `model`,
+     * `year`, `color`. Tidak ada `PATCH` — kendaraan diganti, bukan diubah
+     * di tempat. Layar ini perlu dibangun ulang, bukandisambiguation path.
+     */
     async updateVehicle(payload: Partial<Pick<DriverProfile, 'vehicle_type' | 'vehicle_plate' | 'vehicle_color' | 'vehicle_model'>>) {
       const res = await http.patch<{ data: DriverProfile }>('/drivers/me', { vehicle: payload })
       this.profile = res.data

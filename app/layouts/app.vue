@@ -16,7 +16,7 @@ interface NavItem {
 
 const nav = computed<NavItem[]>(() => {
   const base = auth.homePath
-  if (auth.isCustomer) {
+  if (auth.isUser) {
     return [
       { label: 'Beranda', to: base, icon: 'home' },
       { label: 'Pesan Antar', to: '/customer/book', icon: 'navigation' },

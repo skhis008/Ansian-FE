@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { LatLng, PaymentMethod, Place } from '#shared/types'
+import type { LatLng, Place } from '#shared/types'
 import { fetchRoute, syntheticRoute } from '#shared/utils/geo'
 import { formatRupiah } from '#shared/utils/format'
 
@@ -15,23 +15,33 @@ const pickup = ref<Place | null>(null)
 const destination = ref<Place | null>(null)
 const routePath = ref<LatLng[] | null>(null)
 const note = ref('')
-const paymentMethod = ref<PaymentMethod>('cash')
-const scheduled = ref(false)
-const scheduledAt = ref('')
+const promoCode = ref('')
 
 let routeController: AbortController | null = null
 
-const METHODS: { value: PaymentMethod; label: string; desc: string; icon: string; tone: string }[] = [
-  { value: 'cash', label: 'Tunai', desc: 'Bayar ke driver', icon: 'wallet', tone: 'text-emerald-600' },
-  { value: 'qris', label: 'QRIS', desc: 'Semua e-wallet & m-banking', icon: 'inbox', tone: 'text-ink-800' },
-]
+type VehicleTypeOption = {
+  id: number
+  code: string
+  name: string
+  base_fare: number
+  per_km_rate: number
+  minimum_fare: number
+  bookable: boolean
+}
 
-const ready = computed(() => Boolean(pickup.value && destination.value))
+const { data: vehicleTypes } = await useAsyncData('book-vehicle-types', () =>
+  http.get<{ data: VehicleTypeOption[] }>('/vehicle-types').then(r => r.data.filter(v => v.bookable)),
+)
+
+const vehicleTypeId = computed(() => vehicleTypes.value?.[0]?.id ?? null)
+const selectedVehicle = computed(() => vehicleTypes.value?.find(v => v.id === vehicleTypeId.value) ?? null)
+
+const ready = computed(() => Boolean(pickup.value && destination.value && vehicleTypeId.value))
 const canBook = computed(() => ready.value && !rideStore.booking && !rideStore.hasActiveRide)
 
 /* Auto-quote saat kedua titik terisi */
-watch([pickup, destination], async ([p, d]) => {
-  if (!p || !d) {
+watch([pickup, destination, vehicleTypeId], async ([p, d, typeId]) => {
+  if (!p || !d || !typeId) {
     rideStore.quote = null
     routePath.value = null
     return
@@ -39,11 +49,11 @@ watch([pickup, destination], async ([p, d]) => {
   routeController?.abort()
   routeController = new AbortController()
   const [quote, route] = await Promise.all([
-    rideStore.getQuote(p, d),
+    rideStore.getQuote({ vehicleTypeId: typeId, pickup: p, destination: d, promoCode: promoCode.value || null }),
     fetchRoute(p, d, routeController.signal),
   ])
-  if (quote?.route) routePath.value = quote.route
-  else routePath.value = route.points.length > 2 ? route.points : syntheticRoute(p, d)
+  routePath.value = route.points.length > 2 ? route.points : syntheticRoute(p, d)
+  if (quote) return
 }, { deep: true })
 
 function swap() {
@@ -55,12 +65,13 @@ function swap() {
 async function book() {
   if (!canBook.value || !pickup.value || !destination.value) return
   try {
+    if (!vehicleTypeId.value) return
     const ride = await rideStore.book({
+      vehicleTypeId: vehicleTypeId.value,
       pickup: pickup.value,
       destination: destination.value,
-      payment_method: paymentMethod.value,
-      pickup_note: note.value || undefined,
-      scheduled_at: scheduled.value ? scheduledAt.value : null,
+      pickupNote: note.value || null,
+      promoCode: promoCode.value || null,
     })
     toast.success('Mencari driver terdekat…')
     await router.push(`/customer/active?id=${ride.id}`)
@@ -81,7 +92,7 @@ watch(
 const distanceLabel = computed(() => {
   const q = rideStore.quote
   if (!q) return '—'
-  return `${q.distance_km} km · ${q.duration_min} menit`
+  return `${(q.distance_meters / 1000).toFixed(2)} km`
 })
 
 </script>
@@ -185,47 +196,42 @@ const distanceLabel = computed(() => {
           </div>
         </UiCard>
 
+        <UiCard>
+          <h3 class="text-sm font-semibold text-ink-900">Kendaraan</h3>
+          <div class="mt-3 grid gap-2 sm:grid-cols-2">
+            <button
+              v-for="v in vehicleTypes ?? []"
+              :key="v.id"
+              type="button"
+              class="rounded-xl border p-3 text-left transition"
+              :class="vehicleTypeId === v.id
+                ? 'border-brand-500 bg-brand-50/60 ring-1 ring-brand-500/20'
+                : 'border-ink-200 hover:border-ink-300 hover:bg-ink-50'"
+              @click="vehicleTypeId = v.id"
+            >
+              <span class="block text-xs font-bold text-ink-900">{{ v.name }}</span>
+              <span class="mt-1 block text-[11px] text-ink-500">
+                {{ formatRupiah(v.base_fare) }} + {{ formatRupiah(v.per_km_rate) }}/km
+              </span>
+              <span class="mt-0.5 block text-[10px] text-ink-400">Minimum {{ formatRupiah(v.minimum_fare) }}</span>
+            </button>
+          </div>
+        </UiCard>
+
+        <UiCard>
+          <UiInput
+            v-model="promoCode"
+            label="Kode promo (opsional)"
+            placeholder="misal: hujan10"
+            :maxlength="32"
+          />
+        </UiCard>
+
         <RideFareSummary
           :quote="rideStore.quote"
           :loading="rideStore.quoting"
-          note="Tarif zona sesuai jarak — tanpa biaya tersembunyi."
+          note="Rincian ini dihitung server, sama persis dengan yang dipakai saat kamu menekan tombol pesan."
         />
-
-        <UiCard>
-          <h3 class="text-sm font-semibold text-ink-900">Metode pembayaran</h3>
-          <div class="mt-3 grid grid-cols-2 gap-2">
-            <button
-              v-for="m in METHODS"
-              :key="m.value"
-              type="button"
-              class="flex items-center gap-2.5 rounded-xl border p-2.5 text-left transition"
-              :class="paymentMethod === m.value
-                ? 'border-brand-500 bg-brand-50/60 ring-1 ring-brand-500/20'
-                : 'border-ink-200 hover:border-ink-300 hover:bg-ink-50'"
-              @click="paymentMethod = m.value"
-            >
-              <UiIcon :name="m.icon" class="size-4 shrink-0" :class="m.tone" />
-              <span class="min-w-0">
-                <span class="block truncate text-xs font-bold text-ink-900">{{ m.label }}</span>
-                <span class="block truncate text-[10px] text-ink-500">{{ m.desc }}</span>
-              </span>
-            </button>
-          </div>
-
-          <div class="mt-4 border-t border-ink-100 pt-4">
-            <UiSwitch
-              v-model="scheduled"
-              label="Pesan untuk jadwal nanti"
-              description="Driver akan datang sesuai waktu yang kamu pilih."
-            />
-            <input
-              v-if="scheduled"
-              v-model="scheduledAt"
-              type="datetime-local"
-              class="mt-3 h-11 w-full rounded-xl border border-ink-200 px-3.5 text-sm focus:border-brand-500 focus:ring-3 focus:ring-brand-500/15 focus:outline-none"
-            >
-          </div>
-        </UiCard>
 
         <div class="sticky bottom-20 space-y-2 lg:bottom-4">
           <UiButton size="lg" block :disabled="!canBook" :loading="rideStore.booking" @click="book">

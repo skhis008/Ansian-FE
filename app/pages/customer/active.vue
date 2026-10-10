@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { formatDistance, formatRupiah } from '#shared/utils/format'
-import { RIDE_STATUS_LABELS } from '#shared/types'
+import { isRideCancelled, isRideSettled, RIDE_STATUS_LABELS } from '#shared/types'
 
 definePageMeta({ layout: 'app' })
 useSeoMeta({ title: 'Perjalanan Aktif', robots: 'noindex, nofollow' })
@@ -147,7 +147,7 @@ async function openChat() {
             <p class="text-xs font-medium tracking-wide text-white/60 uppercase">Status</p>
             <h1 class="mt-1 flex items-center gap-2 text-xl font-bold">
               <span
-                v-if="!['completed', 'cancelled', 'failed'].includes(ride.status)"
+                v-if="!isRideSettled(ride.status)"
                 class="flex gap-1"
               >
                 <span class="size-1.5 animate-bounce-dot rounded-full bg-white" />
@@ -166,7 +166,7 @@ async function openChat() {
         </div>
 
         <!-- Progress bar -->
-        <div v-if="!['cancelled', 'failed'].includes(ride.status)" class="mt-5 flex items-center gap-1.5">
+        <div v-if="!isRideCancelled(ride.status)" class="mt-5 flex items-center gap-1.5">
           <span
             v-for="i in 4"
             :key="i"

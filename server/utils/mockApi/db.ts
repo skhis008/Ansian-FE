@@ -78,7 +78,7 @@ function buildUsers(): User[] {
     name: 'Rani Kusuma',
     email: 'customer@ansian.id',
     phone: '081234567890',
-    role: 'customer',
+    role: 'user',
     avatar_url: AVATAR_SVG('Rani Kusuma', 220),
     status: 'active',
     rating: null,
@@ -130,7 +130,7 @@ function buildUsers(): User[] {
       name,
       email: `${isDriver ? 'driver' : 'customer'}${id}@ansian.id`,
       phone: `0812${String(1000000 + i * 137).slice(0, 8)}`,
-      role: isDriver ? 'driver' : 'customer',
+      role: isDriver ? 'driver' : 'user',
       avatar_url: AVATAR_SVG(name, (i * 37) % 360),
       status: i % 17 === 0 ? 'suspended' : i % 11 === 0 ? 'pending' : 'active',
       rating: isDriver ? Number((4.5 + ((i * 13) % 50) / 100).toFixed(2)) : null,
@@ -196,7 +196,7 @@ const STATUS_FLOW: Ride['status'][] = ['searching', 'driver_assigned', 'driver_a
 
 function buildRides(users: User[], drivers: DriverProfile[]): Ride[] {
   const rides: Ride[] = []
-  const customers = users.filter(u => u.role === 'customer')
+  const customers = users.filter(u => u.role === 'user')
   const rnd = seeded(42)
   const ACTIVE: Ride['status'][] = ['searching', 'driver_assigned', 'driver_arrived', 'in_progress']
   /* Satu customer hanya boleh punya satu perjalanan aktif. */
@@ -209,14 +209,20 @@ function buildRides(users: User[], drivers: DriverProfile[]): Ride[] {
     const duration = Math.round((distance / 24) * 60 + 2)
     const fare = calculateZoneFare(distance).total
 
+    // Diannotasi eksplisit lalu dinolai terpisah: kalau ditulis `let status:
+    // Ride['status']` lalu langsung di-*assign* di rantai `if`, TypeScript
+    // mempersempit tipenya jadi enam nilai yang benar-benar terambil, dan
+    // perbandingan dengan `driver_cancelled` di bawah jadi error walau
+    // nilainya sah.
     let status: Ride['status']
+    status = 'completed'
     if (i === 0) status = 'searching'
     else if (i === 1) status = 'driver_assigned'
     else if (i === 2) status = 'driver_arrived'
     else if (i === 3) status = 'in_progress'
-    else if (i % 13 === 0) status = 'cancelled'
-    else if (i % 17 === 0) status = 'failed'
-    else status = 'completed'
+    else if (i % 13 === 0) status = 'passenger_cancelled'
+    else if (i % 17 === 0) status = 'no_driver_found'
+    else if (i % 19 === 0) status = 'driver_cancelled'
 
     const createdHoursAgo = i === 0 ? 0.02 : 0.2 + i * 3.4
     const createdAt = hoursAgo(createdHoursAgo)
@@ -231,25 +237,49 @@ function buildRides(users: User[], drivers: DriverProfile[]): Ride[] {
     }
     const completed = status === 'completed'
 
+    // Bentuknya mengikuti `RideStatusHistoryResource`: `from_status`/`to_status`,
+    // bukan sekadar status. Menyimpan bentuk yang berbeda di mock berarti
+    // timeline yang terlihat benar saat mock hidup akan kosong begitu backend
+    // menyala — dan tidak ada yang salah karena keduanya "berisi".
     const histories: RideStatusHistory[] = [
-      { id: i * 10 + 1, status: 'searching', note: null, created_at: createdAt },
+      {
+        from_status: null,
+        to_status: 'searching',
+        to_status_label: RIDE_STATUS_LABELS.searching,
+        changed_by_role: 'passenger',
+        changed_by_user_id: customer.id,
+        note: null,
+        at: createdAt,
+      },
     ]
     const step = STATUS_FLOW.indexOf(status)
     const flowTimes = [0.05, 0.2, 0.3, 0.5]
     for (let s = 1; s <= step; s++) {
+      const next = STATUS_FLOW[s]!
       histories.push({
-        id: i * 10 + 1 + s,
-        status: STATUS_FLOW[s]!,
+        from_status: STATUS_FLOW[s - 1]!,
+        to_status: next,
+        to_status_label: RIDE_STATUS_LABELS[next],
+        changed_by_role: 'driver',
+        changed_by_user_id: driver?.id ?? null,
         note: null,
-        created_at: hoursAgo(Math.max(0.01, createdHoursAgo - flowTimes[s - 1]!)),
+        at: hoursAgo(Math.max(0.01, createdHoursAgo - flowTimes[s - 1]!)),
       })
     }
-    if (status === 'cancelled' || status === 'failed') {
+    if (isRideCancelled(status)) {
       histories.push({
-        id: i * 10 + 9,
-        status,
-        note: status === 'cancelled' ? 'Dibatalkan oleh pelanggan' : 'Tidak ada driver yang menerima',
-        created_at: hoursAgo(Math.max(0.01, createdHoursAgo - 0.4)),
+        from_status: STATUS_FLOW[step] ?? null,
+        to_status: status,
+        to_status_label: RIDE_STATUS_LABELS[status],
+        changed_by_role: status === 'driver_cancelled' ? 'driver' : 'passenger',
+        changed_by_user_id: status === 'driver_cancelled' ? (driver?.id ?? null) : customer.id,
+        note:
+          status === 'passenger_cancelled'
+            ? 'Dibatalkan oleh pelanggan'
+            : status === 'driver_cancelled'
+              ? 'Dibatalkan oleh driver'
+              : 'Tidak ada driver yang menerima',
+        at: hoursAgo(Math.max(0.01, createdHoursAgo - 0.4)),
       })
     }
 
@@ -266,17 +296,24 @@ function buildRides(users: User[], drivers: DriverProfile[]): Ride[] {
       duration_min: duration,
       fare,
       payment_method: (['cash', 'qris'] as const)[i % 2]!,
-      payment_status: completed ? 'paid' : status === 'cancelled' ? 'refunded' : i % 2 === 1 ? 'pending' : 'unpaid',
-      cancel_reason: status === 'cancelled' ? 'customer_cancel' : status === 'failed' ? 'no_driver' : null,
+      payment_status: completed ? 'paid' : isRideCancelled(status) ? 'refunded' : i % 2 === 1 ? 'pending' : 'unpaid',
+      cancel_reason:
+        status === 'passenger_cancelled'
+          ? 'customer_cancel'
+          : status === 'driver_cancelled'
+            ? 'driver_cancel'
+            : status === 'no_driver_found'
+              ? 'no_driver'
+              : null,
       customer_id: customer.id,
       driver_id: driver?.id ?? null,
       status_histories: histories,
       started_at: step >= 3 ? hoursAgo(Math.max(0.01, createdHoursAgo - 0.5)) : null,
       arrived_at: step >= 2 ? hoursAgo(Math.max(0.01, createdHoursAgo - 0.3)) : null,
       completed_at: completed ? hoursAgo(Math.max(0.01, createdHoursAgo - 0.05)) : null,
-      cancelled_at: status === 'cancelled' || status === 'failed' ? hoursAgo(Math.max(0.01, createdHoursAgo - 0.4)) : null,
+      cancelled_at: isRideCancelled(status) ? hoursAgo(Math.max(0.01, createdHoursAgo - 0.4)) : null,
       created_at: createdAt,
-      updated_at: histories[histories.length - 1]!.created_at,
+      updated_at: histories[histories.length - 1]!.at,
     })
   }
   return rides
@@ -476,7 +513,10 @@ export const db = {
   settings,
   jobs,
   otpChallenges,
-  counters: { job: 1, message: 1000, notification: 100, otp: 1 },
+  /* `user` mulai dari 1000, bukan 1: user hasil seeder sudah memakai id 1-3 dan
+   100-145, jadi counter yang mulai kecil akan bertabrakan dengan user sungguhan
+   yang baru dibuat dan `GET /users/{id}` akan mengembalikan orang yang salah. */
+counters: { job: 1, message: 1000, notification: 100, otp: 1, user: 1000 },
   /* Password akun mock, key = email. Hanya untuk demo frontend, bukan kontrak backend. */
   passwords: new Map<string, string>(users.map(u => [u.email, u.role === 'admin' ? 'admin123' : 'password'])),
 }
@@ -507,13 +547,41 @@ export function rideByCode(code: string): Ride | undefined {
   return db.rides.find(r => r.ride_code === code)
 }
 
-export function activeRideForUser(userId: number, role: 'customer' | 'driver'): Ride | undefined {
+export function activeRideForUser(userId: number, role: 'user' | 'driver'): Ride | undefined {
   return db.rides.find(r => {
-    if (role === 'customer') return r.customer_id === userId && ['searching', 'driver_assigned', 'driver_arrived', 'in_progress'].includes(r.status)
+    if (role === 'user') return r.customer_id === userId && ['searching', 'driver_assigned', 'driver_arrived', 'in_progress'].includes(r.status)
     if (r.driver_id === null) return false
     const profile = db.drivers.find(d => d.id === r.driver_id)
     return profile?.user_id === userId && ['driver_assigned', 'driver_arrived', 'in_progress'].includes(r.status)
   })
+}
+
+/**
+ * Menambahkan satu langkah riwayat status pada perjalanan.
+ *
+ * Satu fungsi dipakai semua tempat yang memindahkan status, karena bentuknya
+ * harus persis sama dengan `RideStatusHistoryResource`. Kalau setiap call site
+ * menulis literal sendiri, bentuknya pasti akan berbeda di satu tempat dan
+ * timeline akan kosong di sana tanpa error.
+ */
+export function pushHistory(
+  ride: Ride,
+  to: Ride['status'],
+  changedByRole: RideStatusHistory['changed_by_role'],
+  changedByUserId: number | null,
+  note: string | null = null,
+): void {
+  ride.status_histories.push({
+    from_status: ride.status,
+    to_status: to,
+    to_status_label: RIDE_STATUS_LABELS[to],
+    changed_by_role: changedByRole,
+    changed_by_user_id: changedByUserId,
+    note,
+    at: nowIso(),
+  })
+  ride.status = to
+  ride.updated_at = nowIso()
 }
 
 export function rideWithRelations(ride: Ride): Ride {

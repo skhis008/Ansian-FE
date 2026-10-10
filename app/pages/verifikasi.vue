@@ -20,12 +20,14 @@ const cooldown = ref(0)
 const resending = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
-const challenge = computed(() => auth.challenge)
-const title = computed(() => (auth.challengePurpose === 'register' ? 'Verifikasi email kamu' : 'Verifikasi keamanan'))
-const subtitle = computed(
-  () =>
-    `Kode 6 digit sudah dikirim ke ${challenge.value?.email_masked ?? 'email kamu'}. Berlaku 5 menit.`,
-)
+const email = computed(() => auth.verifyingEmail)
+const masked = computed(() => {
+  const value = email.value
+  if (!value) return 'email kamu'
+  const [local = '', domain = ''] = value.split('@')
+  const head = local.slice(0, 1)
+  return `${head}${'*'.repeat(Math.max(local.length - 1, 1))}@${domain}`
+})
 
 function startCooldown(seconds: number) {
   cooldown.value = seconds
@@ -49,8 +51,7 @@ async function submit() {
     return
   }
   try {
-    const user = await auth.verifyOtp(value)
-    toast.success(`Selamat datang, ${user.name.split(' ')[0]}!`)
+    await auth.verifyOtp(value)
     const redirect = route.query.redirect
     await navigateTo(typeof redirect === 'string' && redirect.startsWith('/') ? redirect : auth.homePath)
   } catch (e) {
@@ -59,11 +60,11 @@ async function submit() {
 }
 
 async function resend() {
-  if (cooldown.value > 0 || resending.value) return
+  if (cooldown.value > 0 || resending.value || !email.value) return
   resending.value = true
   serverError.value = ''
   try {
-    await auth.resendOtp()
+    await auth.requestOtp(email.value, 'registration')
     toast.success('Kode baru sudah dikirim.')
     startCooldown(60)
   } catch (e) {
@@ -74,50 +75,51 @@ async function resend() {
 }
 
 function back() {
-  const purpose = auth.challengePurpose
-  auth.clearChallenge()
-  navigateTo(purpose === 'register' ? '/register' : '/login')
+  auth.clearVerification()
+  navigateTo('/login')
 }
 </script>
 
 <template>
   <div>
-    <template v-if="challenge">
+    <template v-if="email">
       <span class="grid size-12 place-items-center rounded-2xl bg-brand-50 text-brand-600">
         <UiIcon name="mail" class="size-6" />
       </span>
 
-      <h1 class="mt-5 text-2xl font-bold tracking-tight text-ink-900">{{ title }}</h1>
-      <p class="mt-1.5 text-sm text-ink-500">{{ subtitle }}</p>
+      <h1 class="mt-5 text-2xl font-bold tracking-tight text-ink-900">Verifikasi email kamu</h1>
+      <p class="mt-2 text-[14.5px] leading-relaxed text-ink-500">
+        Kode 6 digit sudah dikirim ke {{ masked }}. Berlaku 5 menit. Pemesanan perjalanan baru bisa
+        dilakukan setelah email terverifikasi.
+      </p>
 
-      <div
-        v-if="serverError"
-        class="mt-5 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3 text-sm text-red-800"
-        role="alert"
-      >
-        <UiIcon name="alert-circle" class="mt-0.5 size-4 shrink-0" />
-        <span>{{ serverError }}</span>
-      </div>
-
-      <form class="mt-6 space-y-4" novalidate @submit.prevent="submit">
-        <UiInput
-          v-model="code"
-          label="Kode verifikasi"
-          placeholder="123456"
-          inputmode="numeric"
-          autocomplete="one-time-code"
-          :maxlength="6"
-          class="text-center font-mono text-xl tracking-[0.5em]"
-          @update:model-value="code = String($event).replace(/\D/g, '').slice(0, 6)"
-        />
-
-        <div
-          v-if="challenge.dev_code"
-          class="rounded-xl border border-dashed border-brand-300 bg-brand-50/60 px-3.5 py-3 text-center"
-        >
-          <p class="text-[11px] font-semibold uppercase tracking-wide text-brand-700">Mode demo (tanpa email)</p>
-          <p class="mt-1 font-mono text-lg font-bold tracking-[0.3em] text-brand-800">{{ challenge.dev_code }}</p>
+      <form class="mt-6 space-y-4" @submit.prevent="submit">
+        <div>
+          <label for="otp" class="mb-1.5 block text-[13px] font-semibold text-ink-700">Kode verifikasi</label>
+          <input
+            id="otp"
+            v-model="code"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            :maxlength="6"
+            class="text-center font-mono text-xl tracking-[0.5em]"
+            @update:model-value="code = String($event).replace(/\D/g, '').slice(0, 6)"
+          >
         </div>
+
+        <!--
+          Kotak kode demo DIHAPUS. Backend tidak pernah mengirim kode OTP di
+          respons — hanya ke email, dan sampai `MAIL_MAILER` diganti SMTP kodenya
+          hanya masuk ke `storage/logs/laravel.log`. Menampilkannya di layar
+          berarti memberitahu siapa pun yang memegang perangkat itu, dan di
+          produksi kode itu jadi bisa dipakai orang lain.
+
+          Saat mock aktif kodenya juga tidak ditampilkan di sini; ambil dari
+          respons `POST /auth/otp/request` kalau sedang menelusuri mock.
+        -->
+
+        <p v-if="serverError" class="text-[13px] font-medium text-danger-600">{{ serverError }}</p>
 
         <UiButton type="submit" size="lg" block :loading="auth.loading">
           Verifikasi
@@ -127,33 +129,27 @@ function back() {
       <div class="mt-5 flex items-center justify-between text-[13px]">
         <button
           type="button"
-          class="font-semibold transition"
-          :class="cooldown > 0 ? 'cursor-not-allowed text-ink-400' : 'text-brand-600 hover:underline'"
-          :disabled="cooldown > 0"
+          class="font-semibold text-brand-600 disabled:cursor-not-allowed disabled:text-ink-300"
+          :disabled="cooldown > 0 || resending"
           @click="resend"
         >
           {{ cooldown > 0 ? `Kirim ulang (${cooldown}s)` : 'Kirim ulang kode' }}
         </button>
-        <button type="button" class="font-semibold text-ink-500 transition hover:text-ink-800" @click="back">
-          Ganti email
+        <button type="button" class="font-semibold text-ink-400 hover:text-ink-600" @click="back">
+          Ganti akun
         </button>
       </div>
-
-      <p class="mt-7 rounded-xl bg-ink-50 px-3.5 py-3 text-center text-[12px] leading-relaxed text-ink-500">
-        Perangkat ini akan dipercaya 30 hari — login berikutnya cukup password.
-      </p>
     </template>
 
     <template v-else>
-      <span class="grid size-12 place-items-center rounded-2xl bg-ink-100 text-ink-500">
-        <UiIcon name="alert-circle" class="size-6" />
+      <span class="grid size-12 place-items-center rounded-2xl bg-ink-100 text-ink-400">
+        <UiIcon name="shield" class="size-6" />
       </span>
-      <h1 class="mt-5 text-2xl font-bold tracking-tight text-ink-900">Sesi verifikasi berakhir</h1>
-      <p class="mt-1.5 text-sm text-ink-500">Silakan masuk atau daftar ulang untuk mendapatkan kode baru.</p>
-      <div class="mt-6 flex flex-col gap-2">
-        <UiButton to="/login" size="lg" block>Ke Halaman Masuk</UiButton>
-        <UiButton to="/register" size="lg" block variant="outline">Daftar Baru</UiButton>
-      </div>
+      <h1 class="mt-5 text-2xl font-bold tracking-tight text-ink-900">Tidak ada verifikasi yang menunggu</h1>
+      <p class="mt-2 text-[14.5px] leading-relaxed text-ink-500">
+        Halaman ini hanya dipakai setelah kode dikirim ke email kamu.
+      </p>
+      <UiButton to="/login" variant="outline" size="lg" block class="mt-6">Kembali ke halaman masuk</UiButton>
     </template>
   </div>
 </template>

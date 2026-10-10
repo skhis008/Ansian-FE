@@ -78,20 +78,23 @@ async function submit() {
   if (!validate()) return
   submitting.value = true
   try {
+    /* Hanya name/email/password yang dikirim.
+     *
+     * `POST /auth/register` di backend selalu membuat akun dengan role `user`
+     * — `AuthController::register` menulis `UserRole::User` tanpa membaca
+     * permintaan. Jadi `role: 'driver'` di sini akan diabaikan diam-diam, dan
+     * orang akan mengira dirinya driver padahal tidak.
+     *
+     * NIM, kampus, dan data kendaraan juga belum punya kolom di backend. Isian
+     * ini tetap dikumpulkan supaya tidak hilang, tapi belum dikirim; backend
+     * belum punya tempat untuk menyimpannya.
+     */
     await auth.register({
       name: form.name,
       email: form.email,
-      phone: form.phone,
       password: form.password,
-      role: 'driver',
-      student_id: form.student_id,
-      campus: form.campus,
-      study_program: form.study_program,
-      vehicle_plate: form.vehicle_plate,
-      vehicle_color: form.vehicle_color,
-      vehicle_model: form.vehicle_model,
     })
-    toast.success('Kode verifikasi dikirim ke email kamu.')
+    toast.success('Akun dibuat. Kode verifikasi dikirim ke email kamu.')
     await navigateTo('/verifikasi')
   } catch (e) {
     errors.value = e instanceof ApiError ? { ...e.fieldErrors() } : {}

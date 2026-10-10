@@ -25,10 +25,14 @@ export default defineNuxtConfig({
   },
 
   runtimeConfig: {
+    // Sengaja TIDAK di `public`. URL backend adalah rahasia deployment: kalau
+    // masuk ke `public`, ia terkirim ke browser di setiap respons dan bisa dibaca
+    // siapa pun yang membuka devtools. Browser tidak pernah memanggil Laravel
+    // secara langsung — semua lewat proxy server-side, jadi tidak butuh CORS
+    // dan URL ini pun tidak perlu diketahui klien.
+    apiBase: process.env.NUXT_API_BASE || 'http://127.0.0.1:8000',
     public: {
-      // Ganti ke URL Laravel backend, contoh: https://api.ansian.id
-      apiBase: process.env.NUXT_PUBLIC_API_BASE || 'http://localhost:8000',
-      // true = pakai mock API bawaan (server/api). false = panggil Laravel.
+      // true = pakai mock API bawaan (server/utils/mockApi). false = panggil Laravel.
       useMock: process.env.NUXT_PUBLIC_USE_MOCK !== 'false',
       appName: 'Ansian',
       appUrl: process.env.NUXT_PUBLIC_APP_URL || 'http://localhost:3000',
@@ -60,6 +64,11 @@ export default defineNuxtConfig({
     '/customer/**': { ssr: true },
     '/driver/**': { ssr: true },
     '/admin/**': { ssr: true },
+    // Alias peran: nilai enum di backend adalah `user` (ADR-011), tapi URLnya
+    // tetap `/customer` supaya tautan lama tidak mati. `/user/*` diarahkan ke
+    // padanannya supaya keduanya benar-benar bisa dipakai.
+    '/user': { redirect: '/customer' },
+    '/user/**': { redirect: '/customer/**' },
   },
 
   nitro: {

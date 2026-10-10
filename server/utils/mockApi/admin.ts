@@ -1,5 +1,5 @@
 import type { H3Event } from 'h3'
-import { createError, getQuery, getRouterParam } from 'h3'
+import { createError, getQuery, getRouterParam, setResponseStatus } from 'h3'
 import type {
   DashboardStats,
   DriverProfile,
@@ -7,16 +7,21 @@ import type {
   RevenueByVehicleType,
   SystemSetting,
   TopDriver,
+  User,
 } from '#shared/types'
 import {
+  authUser,
   db,
   delay,
+  emailRule,
   findOr404,
+  minRule,
   paginate,
   queryList,
   readPayload,
   resource,
   requireRole,
+  validate,
 } from '../api'
 import {
   buildChartSeries,
@@ -34,55 +39,45 @@ export async function stats(event: H3Event) {
   const today = new Date().toISOString().slice(0, 10)
   const ridesToday = rides.filter(r => r.created_at.slice(0, 10) === today)
   const completed = rides.filter(r => r.status === 'completed')
-  const cancelled = rides.filter(r => r.status === 'cancelled' || r.status === 'failed')
+  const cancelled = rides.filter(r => isRideCancelled(r.status))
+  // Hanya perjalanan selesai. Perjalanan yang dibatalkan pernah punya harga di
+  // kalkulator, tapi uangnya tidak pernah berpindah — sama seperti aturan di
+  // `AdminDashboardController` sisi backend (ADR-038).
   const gmv = completed.reduce((a, r) => a + r.fare, 0)
-  const revenue = Math.round(gmv * 0.08)
+  // Mock tidak menyimpan jumlah penilaian per driver, jadi semua yang punya
+  // rating ikut dihitung. Backend menghitung hanya yang `rating_count > 0`.
+  const rated = db.drivers.filter(d => d.rating > 0)
 
   const payload: DashboardStats = {
     total_rides: rides.length,
-    rides_today: ridesToday.length,
+    rides_in_period: ridesToday.length,
     total_users: db.users.length,
-    customers: db.users.filter(u => u.role === 'customer').length,
+    customers: db.users.filter(u => u.role === 'user').length,
     drivers: db.users.filter(u => u.role === 'driver').length,
     online_drivers: db.drivers.filter(d => d.status !== 'offline').length,
-    pending_drivers: db.drivers.filter(d => d.verification === 'pending').length,
-    gmv_today: ridesToday.filter(r => r.status === 'completed').reduce((a, r) => a + r.fare, 0),
-    gmv_month: gmv,
-    revenue_today: revenue,
-    revenue_month: Math.round(gmv * 0.08),
-    avg_fare: completed.length ? Math.round(gmv / completed.length) : 0,
+    active_rides: rides.filter(r => isRideActive(r.status)).length,
+    gmv_in_period: ridesToday.filter(r => r.status === 'completed').reduce((a, r) => a + r.fare, 0),
+    average_fare: completed.length ? Math.round(gmv / completed.length) : 0,
     completion_rate: rides.length ? Number(((completed.length / rides.length) * 100).toFixed(1)) : 0,
     cancellation_rate: rides.length ? Number(((cancelled.length / rides.length) * 100).toFixed(1)) : 0,
-    avg_rating: Number((db.drivers.reduce((a, d) => a + d.rating, 0) / (db.drivers.length || 1)).toFixed(2)),
-    active_rides: rides.filter(r => ['searching', 'driver_assigned', 'driver_arrived', 'in_progress'].includes(r.status)).length,
-    pending_complaints: 3,
-    rides_change_pct: 12.4,
-    gmv_change_pct: 8.7,
-    users_change_pct: 5.2,
+    average_driver_rating: Number(((rated.reduce((a, d) => a + d.rating, 0) / (rated.length || 1)).toFixed(2))),
+    rides_change_pct: 0,
+    gmv_change_pct: 0,
   }
   return resource(payload)
 }
 
-/** GET /api/v1/admin/charts/rides?days=14 */
-export async function chartRides(event: H3Event) {
+/**
+ * GET /api/v1/admin/charts/daily?days=14
+ *
+ * Backend menyajikan satu deret harian, bukan dua: grafik perjalanan dan grafik
+ * GMV membaca titik yang sama. Endpoint `charts/revenue` versi lama tidak
+ * diteruskan: isinya persentase pendapatan platform yang tidak ada di sistem ini.
+ */
+export async function chartDaily(event: H3Event) {
   requireRole(event, 'admin')
   const days = Math.min(90, Number(getQuery(event).days) || 14)
   return resource(buildChartSeries(days))
-}
-
-/** GET /api/v1/admin/charts/revenue?days=14 */
-export async function chartRevenue(event: H3Event) {
-  requireRole(event, 'admin')
-  const days = Math.min(90, Number(getQuery(event).days) || 14)
-  const series = buildChartSeries(days)
-  return resource(
-    series.map(p => ({
-      date: p.date,
-      label: p.label,
-      gross: p.gmv,
-      net: Math.round(p.gmv * 0.08),
-    })),
-  )
 }
 
 /** GET /api/v1/admin/charts/vehicle-type */
@@ -122,16 +117,26 @@ export async function topDrivers(event: H3Event) {
       id: d.id,
       name: d.user.name,
       avatar_url: d.user.avatar_url,
-      driver_code: d.driver_code,
       vehicle_plate: d.vehicle_plate,
       total_rides: d.total_rides,
-      rating: d.rating,
-      earnings: d.earnings_month,
+      gmv: d.earnings_month,
+      collected_cash: d.earnings_month,
     }))
   return resource(list)
 }
 
-/** GET /api/v1/admin/users */
+/**
+ * Cerminan `Route::apiResource('users', UserController::class)` beserta
+ * `App\Policies\UserPolicy`. Tiga aturan di policy itu yang ikut disalin di sini,
+ * karena menyalin endpoint tanpa aturan yang sama berarti mock lebih longgar
+ * dari backend — dan yang longgar justru yang dipakai selama mock masih hidup.
+ *
+ * - `viewAny`: daftar user hanya untuk admin
+ * - `update`: admin boleh semua field, user biasa hanya akunnya sendiri
+ * - `delete`: admin saja, dan tidak boleh akun sendiri
+ */
+
+/** GET /api/v1/users */
 export async function listUsers(event: H3Event) {
   requireRole(event, 'admin')
   const list = queryList(db.users, event, {
@@ -146,10 +151,52 @@ export async function listUsers(event: H3Event) {
   return { data: page.data, links: page.links, meta: page.meta }
 }
 
-/** GET /api/v1/admin/users/{user} */
-export async function showUser(event: H3Event) {
+/** POST /api/v1/users */
+export async function storeUser(event: H3Event) {
   requireRole(event, 'admin')
+  const body = await readPayload(event)
+  validate(body, {
+    name: (v: unknown) => (typeof v === 'string' && v.trim().length >= 3 ? null : 'Nama minimal 3 karakter.'),
+    email: emailRule(),
+    password: minRule(8, 'Password'),
+  })
+  const email = String(body.email).trim().toLowerCase()
+  if (db.users.some(u => u.email.toLowerCase() === email)) {
+    throw createError({
+      statusCode: 422,
+      data: { message: 'Email sudah terdaftar.', errors: { email: ['Email sudah terdaftar.'] } },
+    })
+  }
+  db.counters.user += 1
+  const user: User = {
+    id: db.counters.user,
+    name: String(body.name).trim(),
+    email,
+    phone: body.phone ? String(body.phone) : '',
+    role: (['user', 'driver', 'admin'].includes(String(body.role)) ? body.role : 'user') as User['role'],
+    avatar_url: null,
+    status: 'active',
+    rating: null,
+    rating_count: 0,
+    email_verified_at: nowIso(),
+    phone_verified_at: null,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  }
+  db.users.push(user)
+  db.passwords.set(email, String(body.password))
+  setResponseStatus(event, 201)
+  return resource(user, { message: 'Pengguna berhasil dibuat.' })
+}
+
+/** GET /api/v1/users/{user} */
+export async function showUser(event: H3Event) {
+  const actor = authUser(event)
   const id = Number(getRouterParam(event, 'user'))
+  // `UserPolicy::view` — admin siapa pun, selain itu hanya dirinya sendiri.
+  if (actor.role !== 'admin' && actor.id !== id) {
+    throw createError({ statusCode: 403, data: { message: 'Anda tidak punya akses ke resource ini.' } })
+  }
   const user = findOr404(userById(id), 'Pengguna tidak ditemukan.')
   const rides = db.rides.filter(r => r.customer_id === id)
   const profile = db.drivers.find(d => d.user_id === id)
@@ -165,26 +212,94 @@ export async function showUser(event: H3Event) {
   })
 }
 
-/** PATCH /api/v1/admin/users/{user} */
+/** PUT|PATCH /api/v1/users/{user} */
 export async function updateUser(event: H3Event) {
-  requireRole(event, 'admin')
+  const actor = authUser(event)
   const id = Number(getRouterParam(event, 'user'))
+  // `UserPolicy::update` — admin boleh semua, user biasa hanya dirinya sendiri.
+  if (actor.role !== 'admin' && actor.id !== id) {
+    throw createError({ statusCode: 403, data: { message: 'Anda tidak punya akses ke resource ini.' } })
+  }
   const user = findOr404(userById(id), 'Pengguna tidak ditemukan.')
   const body = await readPayload(event)
-  if (body.name) user.name = String(body.name)
-  if (body.email) user.email = String(body.email)
-  if (body.phone) user.phone = String(body.phone)
-  if (body.role && ['customer', 'driver', 'admin'].includes(body.role)) user.role = body.role
-  if (body.status && ['active', 'pending', 'suspended'].includes(body.status)) user.status = body.status
+  const isAdmin = actor.role === 'admin'
+
+  // `role` DITOLAK untuk bukan admin, bukan diabaikan diam-diam. Mengabaikannya
+  // berarti permintaan yang ditolak terlihat berhasil, dan itu jebakan yang
+  // tidak ada orang yang sadari.
+  if (body.role !== undefined && !isAdmin) {
+    throw createError({
+      statusCode: 422,
+      data: { message: 'Field role tidak boleh diubah.', errors: { role: ['Field role tidak boleh diubah.'] } },
+    })
+  }
+
+  if (body.name !== undefined) {
+    const name = String(body.name).trim()
+    if (name.length < 3) {
+      throw createError({ statusCode: 422, data: { message: 'Nama minimal 3 karakter.', errors: { name: ['Nama minimal 3 karakter.'] } } })
+    }
+    user.name = name
+  }
+  if (body.email !== undefined) {
+    const email = String(body.email).trim().toLowerCase()
+    if (db.users.some(u => u.id !== id && u.email.toLowerCase() === email)) {
+      throw createError({ statusCode: 422, data: { message: 'Email sudah terdaftar.', errors: { email: ['Email sudah terdaftar.'] } } })
+    }
+    user.email = email
+  }
+  if (body.phone !== undefined) user.phone = String(body.phone)
+
+  /**
+   * Password. BE menerima `password` + `password_confirmation` tanpa meminta
+   * `current_password`, jadi siapa pun yang memegang token bisa mengganti
+   * password orang lain. Mock sengaja lebih ketat: `current_password` wajib
+   * untuk mengganti password milik sendiri, dan admin wajib juga mengetik
+   * password akun yang ia ubah.
+   *
+   * Lebih ketat dari backend bukan bertentangan dengan `UserPolicy` — policy
+   * itu mengatur *siapa* boleh, sedangkan ini mengatur *dengan bukti apa*.
+   */
+  if (body.password !== undefined) {
+    const next = String(body.password)
+    if (next.length < 8) {
+      throw createError({
+        statusCode: 422,
+        data: { message: 'Password baru minimal 8 karakter.', errors: { password: ['Password baru minimal 8 karakter.'] } },
+      })
+    }
+    if (body.password_confirmation !== undefined && String(body.password_confirmation) !== next) {
+      throw createError({
+        statusCode: 422,
+        data: { message: 'Konfirmasi password tidak cocok.', errors: { password_confirmation: ['Konfirmasi password tidak cocok.'] } },
+      })
+    }
+    const stored = db.passwords.get(user.email) ?? 'password'
+    if (String(body.current_password ?? '') !== stored) {
+      throw createError({
+        statusCode: 422,
+        data: { message: 'Password saat ini salah.', errors: { current_password: ['Password saat ini salah.'] } },
+      })
+    }
+    db.passwords.set(user.email, next)
+  }
+
+  if (isAdmin && body.role !== undefined) {
+    if (['user', 'driver', 'admin'].includes(String(body.role))) user.role = body.role
+  }
+  if (isAdmin && body.status !== undefined) {
+    if (['active', 'pending', 'suspended'].includes(String(body.status))) user.status = body.status
+  }
   user.updated_at = nowIso()
-  return resource(user, { message: 'Pengguna diperbarui.' })
+  return resource(user, { message: 'Pengguna berhasil diperbarui.' })
 }
 
-/** DELETE /api/v1/admin/users/{user} */
+/** DELETE /api/v1/users/{user} */
 export async function deleteUser(event: H3Event) {
-  const admin = requireRole(event, 'admin')
+  const actor = requireRole(event, 'admin')
   const id = Number(getRouterParam(event, 'user'))
-  if (id === admin.id) {
+  // `UserPolicy::delete` — admin saja, dan tidak boleh akun sendiri.
+  if (id === actor.id) {
     throw createError({ statusCode: 422, data: { message: 'Tidak bisa menghapus akun sendiri.' } })
   }
   const idx = db.users.findIndex(u => u.id === id)
@@ -213,12 +328,11 @@ export async function adminListRides(event: H3Event) {
 export async function adminUpdateRide(event: H3Event) {
   requireRole(event, 'admin')
   const ride = findOr404(db.rides.find(r => r.id === Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
+  const admin = requireRole(event, 'admin')
   const body = await readPayload(event)
-  if (body.status && ['searching', 'driver_assigned', 'driver_arrived', 'in_progress', 'completed', 'cancelled', 'failed'].includes(body.status)) {
-    ride.status = body.status
-    ride.status_histories.push({ id: Date.now(), status: body.status, note: 'Diubah oleh admin', created_at: nowIso() })
+  if (body.status && (RIDE_STATUSES as readonly string[]).includes(String(body.status))) {
+    pushHistory(ride, body.status as RideStatus, 'system', admin.id, 'Diubah oleh admin')
   }
-  ride.updated_at = nowIso()
   return resource(rideWithRelations(ride), { message: 'Perjalanan diperbarui.' })
 }
 

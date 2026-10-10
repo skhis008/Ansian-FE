@@ -1,4 +1,4 @@
-import type { AppNotification, ChatMessage, Ride, RideStatus } from '#shared/types'
+import { isRideCancelled, type AppNotification, type ChatMessage, type Ride, type RideStatus } from '#shared/types'
 import { http } from '~/composables/useApi'
 
 type ChannelNames = {
@@ -188,7 +188,7 @@ export function useRealtime() {
       const text = labels[payload.status]
       if (text) {
         if (payload.status === 'completed') uiStore.success(text)
-        else if (payload.status === 'cancelled' || payload.status === 'failed') uiStore.error(text)
+        else if (isRideCancelled(payload.status)) uiStore.error(text)
         else uiStore.info(text)
       }
     }

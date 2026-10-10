@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { Paginated, Ride } from '#shared/types'
+import { isRideCancelled, normalizeRides, type Paginated, type Ride, type RideResourceShape } from '#shared/types'
 import { formatRupiah } from '#shared/utils/format'
 
 definePageMeta({ layout: 'app' })
@@ -33,7 +33,7 @@ watch(search, v => {
 const { data, pending } = await useAsyncData(
   () => `customer-rides-${auth.user?.id}`,
   () =>
-    http.get<Paginated<Ride>>('/rides', {
+    http.get<{ data?: RideResourceShape[] }>('/rides', {
       filter: activeTab.value || undefined,
       q: debouncedSearch.value || undefined,
       page: page.value,
@@ -42,8 +42,8 @@ const { data, pending } = await useAsyncData(
   { watch: [activeTab, page, debouncedSearch] },
 )
 
-const rides = computed(() => data.value?.data ?? [])
-const meta = computed(() => data.value?.meta)
+const rides = computed(() => normalizeRides(data.value))
+const meta = computed(() => (data.value as unknown as Paginated<Ride> | null)?.meta ?? null)
 
 const summary = computed(() => {
   const list = rides.value
@@ -51,7 +51,7 @@ const summary = computed(() => {
     total: meta.value?.total ?? 0,
     spent: list.filter(r => r.status === 'completed').reduce((a, r) => a + r.fare, 0),
     completed: list.filter(r => r.status === 'completed').length,
-    cancelled: list.filter(r => ['cancelled', 'failed'].includes(r.status)).length,
+    cancelled: list.filter(r => isRideCancelled(r.status)).length,
   }
 })
 

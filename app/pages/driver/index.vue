@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import { normalizeRides } from '#shared/types'
+import type { ChartPoint, RideResourceShape } from '#shared/types'
 import { formatRupiah, formatNumber } from '#shared/utils/format'
 import { currentPosition } from '#shared/utils/geo'
 
@@ -14,26 +16,45 @@ const realtime = useRealtime()
 
 if (auth.isDriver && auth.driver) driver.sync(auth.driver)
 
+type DriverSummary = {
+  role: 'driver'
+  status: string | null
+  is_available: boolean
+  total_rides: number
+  active_rides: number
+  rating: number | null
+  earnings_today: number
+  earnings_month: number
+  collected_cash_month: number
+  currency: string
+  series: ChartPoint[]
+}
+
 const { data: summary } = await useAsyncData(`driver-summary-${auth.user?.id}`, () =>
-  http.get<{ data: any }>('/me/summary').then(r => r.data),
+  http.get<{ data: DriverSummary }>('/me/summary').then(r => r.data),
 )
 
-const { data: activity } = await useAsyncData(`driver-activity-${auth.user?.id}`, () =>
-  http.get<{ data: any[] }>('/me/activity').then(r => r.data),
-)
+/*
+ * Sama seperti di halaman penumpang: `GET /rides` sudah dibatasi backend ke
+ * perjalanan milik driver yang sedang masuk, jadi tidak ada endpoint
+ * `/me/activity` yang perlu ada.
+ */
+const { data: recent } = await useAsyncData(`driver-recent-${auth.user?.id}`, async () => {
+  const r = await http.get<{ data?: RideResourceShape[] }>('/rides', { per_page: 6 })
+  return normalizeRides(r)
+})
 
 const { data: activeRide } = await useAsyncData(`driver-active-${auth.user?.id}`, async () => {
-  const r = await http.get<{ data: any }>('/rides/active')
-  rideStore.setActive(r.data)
-  return r.data
+  const r = await http.get<{ data?: RideResourceShape[] }>('/rides', { scope: 'active', per_page: 1 })
+  const ride = normalizeRides(r)[0] ?? null
+  rideStore.setActive(ride)
+  return ride
 })
 
 const myPosition = ref<{ lat: number; lng: number } | null>(null)
 
 onMounted(async () => {
   if (auth.isDriver && auth.driver) driver.sync(auth.driver)
-  const res = await http.get<{ data: any }>('/me/summary')
-  void res
   await Promise.all([driver.fetchJobs(), driver.fetchEarnings().catch(() => undefined)])
   if (driver.isAvailable) rideStore.startPolling(8000)
 
@@ -60,34 +81,42 @@ async function toggleStatus() {
   }
 }
 
+/*
+ * Rating null berarti belum ada penilaian sama sekali, dan itu ditulis sebagai
+ * `-`. `?? 5` pernah dipakai di sini dan selalu menampilkan 5,00 untuk driver
+ * yang belum pernah dinilai: angka yang terlihat paling tinggi justru yang paling
+ * tidak jujur.
+ */
+const ratingValue = computed(() => summary.value?.rating ?? driver.profile?.rating ?? null)
+
 const stats = computed(() => [
   {
     label: 'Pendapatan Hari Ini',
-    value: formatRupiah(summary.value?.earnings_today ?? driver.earnings?.today ?? 0),
-    sub: `${driver.earnings?.trips_today ?? 0} perjalanan`,
-    icon: 'wallet',
+    value: formatRupiah(summary.value?.earnings_today ?? 0),
+    sub: 'dari perjalanan selesai',
+    icon: 'zap',
     tone: 'bg-emerald-50 text-emerald-600',
   },
   {
     label: 'Pendapatan Bulan Ini',
-    value: formatRupiah(summary.value?.earnings_month ?? driver.earnings?.month ?? 0),
-    sub: `${driver.earnings?.trips_month ?? 0} perjalanan`,
+    value: formatRupiah(summary.value?.earnings_month ?? 0),
+    sub: 'dari perjalanan selesai',
     icon: 'trending-up',
     tone: 'bg-brand-50 text-brand-600',
   },
   {
-    label: 'Rating',
-    value: (summary.value?.rating ?? driver.profile?.rating ?? 5).toFixed(2),
-    sub: `${formatNumber(driver.profile?.total_rides ?? 0)} total perjalanan`,
-    icon: 'star',
-    tone: 'bg-amber-50 text-amber-600',
+    label: 'Setoran Tunai Bulan Ini',
+    value: formatRupiah(summary.value?.collected_cash_month ?? 0),
+    sub: 'sudah disetor ke admin',
+    icon: 'briefcase',
+    tone: 'bg-violet-50 text-violet-600',
   },
   {
-    label: 'Online Hours',
-    value: formatNumber(summary.value?.online_hours ?? driver.profile?.online_hours ?? 0),
-    sub: 'jam',
-    icon: 'clock',
-    tone: 'bg-violet-50 text-violet-600',
+    label: 'Rating',
+    value: ratingValue.value === null ? '-' : ratingValue.value.toFixed(2),
+    sub: `${formatNumber(summary.value?.total_rides ?? 0)} perjalanan selesai`,
+    icon: 'star',
+    tone: 'bg-amber-50 text-amber-600',
   },
 ])
 </script>
@@ -255,15 +284,15 @@ const stats = computed(() => [
     <!-- Aktivitas -->
     <div>
       <AppPageHeader title="Perjalanan Terakhir" />
-      <div v-if="!activity?.length" class="rounded-2xl border border-ink-200 bg-white p-6">
+      <div v-if="!recent?.length" class="rounded-2xl border border-ink-200 bg-white p-6">
         <AppEmptyState icon="history" title="Belum ada perjalanan" description="Riwayat akan muncul setelah kamu menyelesaikan order pertama." />
       </div>
       <div v-else class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <UiCard v-for="a in activity.slice(0, 6)" :key="a.id" class="!p-4">
+        <UiCard v-for="a in recent.slice(0, 6)" :key="a.id" class="!p-4">
           <div class="flex items-start justify-between gap-2">
             <div class="min-w-0">
-              <p class="truncate text-[13px] font-semibold text-ink-900">{{ a.destination_name }}</p>
-              <p class="truncate text-[11px] text-ink-500">Dari {{ a.pickup_name }}</p>
+              <p class="truncate text-[13px] font-semibold text-ink-900">{{ a.destination.address }}</p>
+              <p class="truncate text-[11px] text-ink-500">Dari {{ a.pickup.address }}</p>
             </div>
             <RideStatusBadge :status="a.status" />
           </div>

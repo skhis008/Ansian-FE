@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import type { Paginated, Ride, RideStatus } from '#shared/types'
+import { normalizeRides, type Paginated, type Ride, type RideResourceShape, type RideStatus } from '#shared/types'
 import { formatRupiah, formatDateTime } from '#shared/utils/format'
 
 definePageMeta({ layout: 'app' })
@@ -20,12 +20,15 @@ watch([search, status], () => {
 
 const { data, pending, refresh } = await useAsyncData(
   'admin-rides',
-  () => http.get<Paginated<Ride>>('/admin/rides', { ...query, page: page.value, per_page: 15 }),
+  // BE `GET /rides` menerima `status`, `scope`, `page`, `per_page` saja — tidak ada
+  // `search` dan tidak ada `sort_by`. Kotak pencarian di layar ini jadi tidak
+  // berguna saat mock dimatikan; pencarian ride perlu endpoint baru.
+  () => http.get<{ data?: RideResourceShape[] }>('/rides', { status: query.status || undefined, page: page.value, per_page: 15 }),
   { watch: [query, page] },
 )
 
-const rows = computed(() => data.value?.data ?? [])
-const meta = computed(() => data.value?.meta)
+const rows = computed(() => normalizeRides(data.value))
+const meta = computed(() => (data.value as unknown as Paginated<Ride> | null)?.meta ?? null)
 
 const editing = ref<Ride | null>(null)
 const nextStatus = ref<RideStatus>('completed')
@@ -37,8 +40,10 @@ const STATUS_OPTIONS: { value: RideStatus; label: string }[] = [
   { value: 'driver_arrived', label: 'Driver Tiba' },
   { value: 'in_progress', label: 'Berjalan' },
   { value: 'completed', label: 'Selesai' },
-  { value: 'cancelled', label: 'Dibatalkan' },
-  { value: 'failed', label: 'Gagal' },
+  { value: 'passenger_cancelled', label: 'Dibatalkan penumpang' },
+  { value: 'driver_cancelled', label: 'Dibatalkan driver' },
+  { value: 'no_driver_found', label: 'Tidak ada driver' },
+  { value: 'rejected', label: 'Mencari driver lagi' },
 ]
 
 function openEdit(ride: Ride) {

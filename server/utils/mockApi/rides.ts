@@ -11,6 +11,7 @@ import {
   paginate,
   queryList,
   readPayload,
+  requireRole,
   required,
   resource,
   validate,
@@ -65,20 +66,29 @@ export async function listRides(event: H3Event) {
   const q = getQuery(event)
 
   let rides = db.rides.slice()
-  if (user.role === 'customer') {
+  if (user.role === 'user') {
     rides = rides.filter(r => r.customer_id === user.id)
   } else if (user.role === 'driver') {
     const profile = driverByUserId(user.id)
     rides = rides.filter(r => r.driver_id === profile?.id)
   }
 
-  const activeFilter = String(q.filter ?? '')
-  if (activeFilter === 'active') {
-    rides = rides.filter(r => ['searching', 'driver_assigned', 'driver_arrived', 'in_progress'].includes(r.status))
-  } else if (activeFilter === 'completed') {
-    rides = rides.filter(r => r.status === 'completed')
-  } else if (activeFilter === 'cancelled') {
-    rides = rides.filter(r => ['cancelled', 'failed'].includes(r.status))
+  /**
+   * Cerminan filter `GET /rides` di routes/api.php: `scope` untuk active/past,
+   * `status` untuk satu status persis. Keduanya union —FE tidak boleh menghitung
+   * status di klien lalu menganggap hasilnya sama dengan yang server punya.
+   */
+  const activeStatuses = ['searching', 'driver_assigned', 'driver_arrived', 'in_progress']
+  const scope = String(q.scope ?? 'all')
+  if (scope === 'active') {
+    rides = rides.filter(r => activeStatuses.includes(r.status))
+  } else if (scope === 'past') {
+    rides = rides.filter(r => !activeStatuses.includes(r.status))
+  }
+
+  if (q.status) {
+    const wanted = new Set(String(q.status).split(',').map(s => s.trim()))
+    rides = rides.filter(r => wanted.has(r.status))
   }
 
   rides = queryList(rides, event, {
@@ -96,7 +106,9 @@ export async function listRides(event: H3Event) {
     sort: { created_at: 'desc', fare: 'desc' },
   })
 
-  const enriched = rides.map(rideWithRelations)
+  // Dispatch otomatis hanya jalan saat yang ditanyakan sedang menunggu driver.
+  // Kalau tidak, daftar riwayat ikut mengubah perjalanan yang tidak sedang aktif.
+  const enriched = rides.map(r => (scope === 'active' ? simulateDispatch(r) : r)).map(rideWithRelations)
   const perPage = Number(q.per_page) || 10
   const page = paginate(enriched, event, perPage)
   return { data: page.data, links: page.links, meta: page.meta }
@@ -113,15 +125,8 @@ function simulateDispatch(ride: Ride): Ride {
   const driver = db.drivers.find(d => d.status === 'idle')
   if (!driver) return ride
 
-  ride.status = 'driver_assigned'
   ride.driver_id = driver.id
-  ride.updated_at = nowIso()
-  ride.status_histories.push({
-    id: Date.now(),
-    status: 'driver_assigned',
-    note: `Driver ${driver.vehicle_plate} ditugaskan otomatis`,
-    created_at: nowIso(),
-  })
+  pushHistory(ride, 'driver_assigned', 'system', null, `Driver ${driver.vehicle_plate} ditugaskan otomatis`)
 
   driver.status = 'busy'
   driver.earnings_today += Math.round(ride.fare * 0.8)
@@ -130,14 +135,6 @@ function simulateDispatch(ride: Ride): Ride {
   // Permintaan terbuka ditutup karena sudah ada driver yang Locks ride ini.
   db.jobs.splice(0, db.jobs.length, ...db.jobs.filter(j => j.ride_code !== ride.ride_code))
   return ride
-}
-
-/** GET /api/v1/rides/active */
-export async function getActiveRide(event: H3Event) {
-  const user = authUser(event)
-  const ride = activeRideForUser(user.id, user.role === 'driver' ? 'driver' : 'customer')
-  if (ride) simulateDispatch(ride)
-  return resource(ride ? rideWithRelations(ride) : null)
 }
 
 /** GET /api/v1/rides/{ride} */
@@ -172,7 +169,7 @@ export async function createRide(event: H3Event) {
     destination: required('Tujuan'),
   })
 
-  const existing = activeRideForUser(user.id, 'customer')
+  const existing = activeRideForUser(user.id, 'user')
   if (existing) {
     throw createError({ statusCode: 409, data: { message: 'Anda masih punya perjalanan yang sedang berjalan.' } })
   }
@@ -211,7 +208,17 @@ export async function createRide(event: H3Event) {
     cancel_reason: null,
     customer_id: user.id,
     driver_id: null,
-    status_histories: [{ id: Date.now(), status: 'searching', note: null, created_at: nowIso() }],
+    status_histories: [
+      {
+        from_status: null,
+        to_status: 'searching',
+        to_status_label: RIDE_STATUS_LABELS.searching,
+        changed_by_role: 'passenger',
+        changed_by_user_id: user.id,
+        note: null,
+        at: nowIso(),
+      },
+    ],
     started_at: null,
     arrived_at: null,
     completed_at: null,
@@ -230,22 +237,22 @@ export async function cancelRide(event: H3Event) {
   const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
   authorizeRide(user, ride)
 
-  if (['completed', 'cancelled', 'failed'].includes(ride.status)) {
+  if (isRideSettled(ride.status)) {
     throw createError({ statusCode: 409, data: { message: 'Perjalanan sudah tidak aktif.' } })
   }
 
   const body = await readPayload(event)
-  const reason = body.reason ?? (user.role === 'driver' ? 'driver_cancel' : 'customer_cancel')
-  ride.status = 'cancelled'
-  ride.cancel_reason = reason
+  const byDriver = user.role === 'driver'
+  /*
+   * Pelaku pembatalan DITURUNKAN dari akun pemanggil, bukan dibaca dari
+   * `body.reason` — sama seperti ADR-020 di backend. Kalau kolom ini boleh diisi
+   * dari request, ia jadi kolom yang bisa diisi kolom lain sendiri, dan hasilnya
+   * "penumpang membatalkan atas nama driver" tidak ada yang bisa dicegat.
+   */
+  const status = byDriver ? 'driver_cancelled' : 'passenger_cancelled'
+  ride.cancel_reason = byDriver ? 'driver_cancel' : 'customer_cancel'
   ride.cancelled_at = nowIso()
-  ride.updated_at = nowIso()
-  ride.status_histories.push({
-    id: Date.now(),
-    status: 'cancelled',
-    note: body.note ?? 'Dibatalkan',
-    created_at: nowIso(),
-  })
+  pushHistory(ride, status, byDriver ? 'driver' : 'passenger', user.id, body.note ?? null)
 
   if (ride.driver_id) {
     const d = db.drivers.find(x => x.id === ride.driver_id)
@@ -256,7 +263,7 @@ export async function cancelRide(event: H3Event) {
   return resource(rideWithRelations(ride), { message: 'Perjalanan dibatalkan.' })
 }
 
-/** POST /api/v1/rides/{ride}/rate */
+/** POST /api/v1/rides/{ride}/rating */
 export async function rateRide(event: H3Event) {
   const user = authUser(event)
   const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
@@ -299,14 +306,6 @@ export async function rateRide(event: H3Event) {
   return resource(rideWithRelations(ride), { message: 'Terima kasih atas penilaian Anda.' })
 }
 
-/** GET /api/v1/rides/{ride}/timeline */
-export async function rideTimeline(event: H3Event) {
-  const user = authUser(event)
-  const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
-  authorizeRide(user, ride)
-  return resource(ride.status_histories)
-}
-
 /* ==================================================================
  * DRIVER
  * ================================================================== */
@@ -314,7 +313,7 @@ export async function rideTimeline(event: H3Event) {
 /** GET /api/v1/drivers — daftar driver (admin) */
 export async function listDrivers(event: H3Event) {
   const user = authUser(event)
-  if (user.role === 'customer') {
+  if (user.role === 'user') {
     throw createError({ statusCode: 403, data: { message: 'Tidak punya akses.' } })
   }
   const list = db.drivers
@@ -360,7 +359,7 @@ export async function nearbyDrivers(event: H3Event) {
 /** GET /api/v1/drivers/{driver} */
 export async function showDriver(event: H3Event) {
   const user = authUser(event)
-  if (user.role === 'customer') {
+  if (user.role === 'user') {
     throw createError({ statusCode: 403, data: { message: 'Tidak punya akses.' } })
   }
   return resource(findOr404(driverById(Number(getRouterParam(event, 'driver'))), 'Driver tidak ditemukan.'))
@@ -385,29 +384,31 @@ export async function updateMyDriverProfile(event: H3Event) {
   return resource(profile, { message: 'Profil diperbarui.' })
 }
 
-/** POST /api/v1/drivers/me/status */
-export async function setDriverStatus(event: H3Event) {
-  const user = authUser(event)
-  if (user.role !== 'driver') {
-    throw createError({ statusCode: 403, data: { message: 'Hanya driver yang bisa mengakses.' } })
-  }
+/**
+ * PUT /api/v1/driver/profile/availability
+ *
+ * Backend menamai switch-nya `is_available`, bukan `status`. Alasannya ada di
+ * DriverProfileController: `is_available` boleh driver ubah sendiri, sedangkan
+ * `status` tidak boleh dilewati olehnya. Jadi klien tidak pernah mengirim status.
+ */
+export async function setDriverAvailability(event: H3Event) {
+  const user = requireRole(event, 'driver')
   const body = await readPayload(event)
-  validate(body, { status: (v: unknown) => (['online', 'offline'].includes(String(v)) ? null : 'Status tidak valid.') })
+  validate(body, { is_available: (v: unknown) => (typeof v === 'boolean' ? null : 'Status ketersediaan harus berupa true atau false.') })
 
   const profile = findOr404(driverByUserId(user.id), 'Profil driver tidak ditemukan.')
-  profile.status = body.status === 'online' ? 'idle' : 'offline'
+  profile.status = body.is_available ? 'idle' : 'offline'
   profile.last_seen_at = nowIso()
   return resource(profile, { message: profile.status === 'idle' ? 'Anda sekarang online' : 'Anda sekarang offline' })
 }
 
-/** POST /api/v1/drivers/me/location */
+/** PUT /api/v1/driver/profile/location */
 export async function updateDriverLocation(event: H3Event) {
-  const user = authUser(event)
-  if (user.role !== 'driver') return resource(null)
+  const user = requireRole(event, 'driver')
   const body = await readPayload(event)
   const profile = findOr404(driverByUserId(user.id), 'Profil driver tidak ditemukan.')
-  profile.lat = Number(body.lat) || profile.lat
-  profile.lng = Number(body.lng) || profile.lng
+  profile.lat = Number.isFinite(Number(body.lat)) ? Number(body.lat) : profile.lat
+  profile.lng = Number.isFinite(Number(body.lng)) ? Number(body.lng) : profile.lng
   profile.last_seen_at = nowIso()
   return resource({ lat: profile.lat, lng: profile.lng, last_seen_at: profile.last_seen_at })
 }
@@ -439,8 +440,8 @@ export async function myEarnings(event: H3Event) {
   })
 }
 
-/** GET /api/v1/drivers/jobs — antrean permintaan terdekat */
-export async function listJobs(event: H3Event) {
+/** GET /api/v1/driver/rides/nearby — antrean permintaan terdekat */
+export async function listNearbyRides(event: H3Event) {
   const user = authUser(event)
   if (user.role !== 'driver') {
     throw createError({ statusCode: 403, data: { message: 'Hanya driver yang bisa mengakses.' } })
@@ -460,7 +461,7 @@ export async function listJobs(event: H3Event) {
   return { data: jobs, links: {}, meta: { total: jobs.length } }
 }
 
-/** POST /api/v1/drivers/jobs/{ride}/accept */
+/** POST /api/v1/rides/{ride}/accept */
 export async function acceptJob(event: H3Event) {
   const user = authUser(event)
   const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
@@ -470,10 +471,8 @@ export async function acceptJob(event: H3Event) {
     throw createError({ statusCode: 409, data: { message: 'Perjalanan sudah diambil driver lain.' } })
   }
 
-  ride.status = 'driver_assigned'
   ride.driver_id = profile.id
-  ride.updated_at = nowIso()
-  ride.status_histories.push({ id: Date.now(), status: 'driver_assigned', note: null, created_at: nowIso() })
+  pushHistory(ride, 'driver_assigned', 'driver', user.id)
   profile.status = 'busy'
   profile.earnings_today += ride.fare * 0.8
   profile.total_rides += 1
@@ -491,7 +490,7 @@ export async function rejectJob(event: H3Event) {
   return resource({ rejected: true }, { message: 'Permintaan dilewati.' })
 }
 
-/** POST /api/v1/drivers/rides/{ride}/arrive */
+/** POST /api/v1/rides/{ride}/arrive */
 export async function markArrived(event: H3Event) {
   const user = authUser(event)
   const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
@@ -499,11 +498,11 @@ export async function markArrived(event: H3Event) {
   if (ride.status !== 'driver_assigned') {
     throw createError({ statusCode: 409, data: { message: 'Status perjalanan tidak sesuai.' } })
   }
-  transition(ride, 'driver_arrived', 'Driver sudah di lokasi')
+  transition(ride, 'driver_arrived', 'Driver sudah di lokasi', 'driver', user.id)
   return resource(rideWithRelations(ride), { message: 'Pelanggan sudah diinformasikan.' })
 }
 
-/** POST /api/v1/drivers/rides/{ride}/start */
+/** POST /api/v1/rides/{ride}/start */
 export async function startRide(event: H3Event) {
   const user = authUser(event)
   const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
@@ -512,11 +511,11 @@ export async function startRide(event: H3Event) {
     throw createError({ statusCode: 409, data: { message: 'Tandai driver tiba dulu sebelum memulai.' } })
   }
   ride.started_at = nowIso()
-  transition(ride, 'in_progress', 'Perjalanan dimulai')
+  transition(ride, 'in_progress', 'Perjalanan dimulai', 'driver', user.id)
   return resource(rideWithRelations(ride), { message: 'Selamat jalan! Have a nice trip.' })
 }
 
-/** POST /api/v1/drivers/rides/{ride}/complete */
+/** POST /api/v1/rides/{ride}/complete */
 export async function completeRide(event: H3Event) {
   const user = authUser(event)
   const ride = findOr404(rideById(Number(getRouterParam(event, 'ride'))), 'Perjalanan tidak ditemukan.')
@@ -525,7 +524,7 @@ export async function completeRide(event: H3Event) {
     throw createError({ statusCode: 409, data: { message: 'Perjalanan belum dimulai.' } })
   }
   ride.completed_at = nowIso()
-  transition(ride, 'completed', 'Perjalanan selesai')
+  transition(ride, 'completed', 'Perjalanan selesai', 'driver', user.id)
 
   if (ride.driver_id) {
     const d = db.drivers.find(x => x.id === ride.driver_id)
@@ -549,9 +548,7 @@ export async function assignDriver(event: H3Event) {
   const body = await readPayload(event)
   const driver = findOr404(driverById(Number(body.driver_id)), 'Driver tidak ditemukan.')
   ride.driver_id = driver.id
-  ride.status = 'driver_assigned'
-  ride.updated_at = nowIso()
-  ride.status_histories.push({ id: Date.now(), status: 'driver_assigned', note: `Ditugaskan manual: ${driver.user.name}`, created_at: nowIso() })
+  pushHistory(ride, 'driver_assigned', 'system', null, `Ditugaskan manual: ${driver.user.name}`)
   return resource(rideWithRelations(ride), { message: 'Driver ditugaskan.' })
 }
 
@@ -792,7 +789,7 @@ export async function paymentWebhook(event: H3Event) {
 
 function authorizeRide(user: { id: number; role: string }, ride: Ride) {
   if (user.role === 'admin') return
-  if (user.role === 'customer' && ride.customer_id === user.id) return
+  if (user.role === 'user' && ride.customer_id === user.id) return
   if (user.role === 'driver') {
     const profile = driverByUserId(user.id)
     if (profile && ride.driver_id === profile.id) return
@@ -800,10 +797,8 @@ function authorizeRide(user: { id: number; role: string }, ride: Ride) {
   throw createError({ statusCode: 403, data: { message: 'Anda tidak punya akses ke perjalanan ini.' } })
 }
 
-function transition(ride: Ride, status: RideStatus, note: string) {
-  ride.status = status
-  ride.updated_at = nowIso()
-  ride.status_histories.push({ id: Date.now(), status, note, created_at: nowIso() })
+function transition(ride: Ride, status: RideStatus, note: string, by: 'driver' | 'passenger' | 'system', byUserId: number | null) {
+  pushHistory(ride, status, by, byUserId, note)
 }
 
 function rideOwnedBy(rideId: number | null, userId: number): boolean {

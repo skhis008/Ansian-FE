@@ -1,3 +1,5 @@
+import type { UserRole } from '#shared/types'
+
 export default defineNuxtRouteMiddleware(async to => {
   const auth = useAuthStore()
 
@@ -21,11 +23,31 @@ export default defineNuxtRouteMiddleware(async to => {
     return navigateTo({ path: '/login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : {} })
   }
 
-  /* Gate per role: /customer/* hanya untuk customer, dst. */
+  /*
+   * Gate per peran.
+   *
+   * Pemetaannya lewat objek, bukan `segment !== auth.role`. Segmen URL dan
+   * nilai peran tidak lagi sama nama: `/customer` dijaga oleh peran `user`,
+   * jadi perbandingan langsung akan menolak setiap penumpang
+   * dari halamannya sendiri.
+   */
   const segment = to.path.split('/')[1]
-  const required = segment === 'customer' || segment === 'driver' || segment === 'admin' ? segment : null
+  const required = ROLE_SEGMENT[segment]
 
   if (required && required !== auth.role) {
     return navigateTo(auth.homePath)
   }
 })
+
+/**
+ * Segmen URL -> peran yang boleh membukanya.
+ *
+ * `/customer` adalah alias dari peran `user`. Keduanya diterima supaya URL lama
+ * tetap hidup dan `/user` bisa dipakai tanpa redirect yang sudah tidak perlu.
+ */
+const ROLE_SEGMENT: Record<string, UserRole | undefined> = {
+  customer: 'user',
+  user: 'user',
+  driver: 'driver',
+  admin: 'admin',
+}

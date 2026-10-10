@@ -1,8 +1,18 @@
 <script setup lang="ts">
 import type { FareQuote } from '#shared/types'
-import { formatDistance, formatDuration, formatRupiah } from '#shared/utils/format'
+import { formatRupiah } from '#shared/utils/format'
 
 defineProps<{ quote: FareQuote | null; loading?: boolean; note?: string }>()
+
+/*
+ * Rincian ini disalin apa adanya dari `POST /rides/preview`. Backend menghitung
+ * tarif dari tarif dasar ditambah kilometer, jadi begitu juga yang ditampilkan:
+ * Passenger berhak tahu kenapa ongkosnya segitu, dan angka yang tampil di sini
+ * adalah angka yang dipakai server saat memesan.
+ *
+ * Tidak ada "biaya admin" dan tidak ada zona. Keduanya tidak ada di backend —
+ * uang tidak pernah singgah di aplikasi, jadi tidak ada komisi untuk dipotong.
+ */
 </script>
 
 <template>
@@ -11,11 +21,9 @@ defineProps<{ quote: FareQuote | null; loading?: boolean; note?: string }>()
       <h3 class="text-sm font-semibold text-ink-900">Rincian tarif</h3>
       <span
         v-if="quote"
-        class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold"
-        :style="{ backgroundColor: `${quote.zone_color}1a`, color: quote.zone_color }"
+        class="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-[11px] font-bold text-brand-700"
       >
-        <span class="size-2 rounded-full" :style="{ backgroundColor: quote.zone_color }" />
-        {{ quote.zone_label }}
+        {{ quote.billable_kilometres }} km ditagih
       </span>
     </div>
 
@@ -26,28 +34,42 @@ defineProps<{ quote: FareQuote | null; loading?: boolean; note?: string }>()
     <template v-else-if="quote">
       <dl class="mt-3 space-y-2 text-sm">
         <div class="flex justify-between">
-          <dt class="text-ink-500">Tarif zona {{ quote.zone_label }} ({{ formatDistance(quote.distance_km) }})</dt>
-          <dd class="font-medium text-ink-700">{{ formatRupiah(quote.zone_fare) }}</dd>
+          <dt class="text-ink-500">Tarif dasar</dt>
+          <dd class="font-medium text-ink-700">{{ formatRupiah(quote.base_fare) }}</dd>
         </div>
         <div class="flex justify-between">
-          <dt class="text-ink-500">Biaya admin</dt>
-          <dd class="font-medium text-ink-700">{{ formatRupiah(quote.admin_fee) }}</dd>
+          <dt class="text-ink-500">
+            Ongkos {{ quote.billable_kilometres }} km × {{ formatRupiah(quote.per_km_rate) }}
+          </dt>
+          <dd class="font-medium text-ink-700">
+            {{ formatRupiah(quote.billable_kilometres * quote.per_km_rate) }}
+          </dd>
+        </div>
+        <div class="flex justify-between">
+          <dt class="text-ink-500">Jarak sebenarnya</dt>
+          <dd class="font-medium text-ink-700">
+            {{ (quote.distance_meters / 1000).toFixed(2) }} km
+          </dd>
+        </div>
+        <div v-if="quote.surcharge" class="flex justify-between">
+          <dt class="text-ink-500">{{ quote.surcharge.name }}</dt>
+          <dd class="font-medium text-ink-700">{{ formatRupiah(quote.surcharge.amount) }}</dd>
+        </div>
+        <div v-if="quote.discount_amount > 0" class="flex justify-between">
+          <dt class="text-ink-500">Diskon{{ quote.promo_code ? ` ${quote.promo_code}` : '' }}</dt>
+          <dd class="font-medium text-emerald-600">−{{ formatRupiah(quote.discount_amount) }}</dd>
+        </div>
+        <div v-if="quote.minimum_fare > quote.base_fare" class="flex justify-between">
+          <dt class="text-ink-500">Minimum tarif</dt>
+          <dd class="font-medium text-ink-500">
+            {{ formatRupiah(quote.minimum_fare) }}
+            <span class="text-[11px] font-normal">(tidak berlaku)</span>
+          </dd>
         </div>
       </dl>
 
-      <div class="mt-3 space-y-1 border-t border-ink-100 pt-3 text-xs text-ink-500">
-        <div class="flex justify-between">
-          <span>Estimasi waktu</span>
-          <span class="font-semibold text-ink-700">{{ formatDuration(quote.duration_min) }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span>Driver terdekat</span>
-          <span class="font-semibold text-emerald-600">{{ quote.nearest_drivers }} tersedia</span>
-        </div>
-      </div>
-
       <div class="mt-3 flex items-end justify-between rounded-xl bg-brand-50 px-3.5 py-3">
-        <span class="text-sm font-semibold text-brand-800">Total dibayar</span>
+        <span class="text-sm font-semibold text-brand-800">Total</span>
         <span class="text-xl font-bold text-brand-700">{{ formatRupiah(quote.total) }}</span>
       </div>
 

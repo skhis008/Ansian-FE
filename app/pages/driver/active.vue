@@ -86,7 +86,7 @@ async function advance() {
   busy.value = true
   try {
     const endpoint = arrived.value ? 'start' : 'arrive'
-    const res = await http.post<{ data: Ride }>(`/drivers/rides/${ride.value.id}/${endpoint}`)
+    const res = await http.post<{ data: Ride }>(`/rides/${ride.value.id}/${endpoint}`)
     rideStore.setActive(res.data)
     await refresh()
     toast.success(
@@ -103,7 +103,7 @@ async function complete() {
   if (!ride.value) return
   busy.value = true
   try {
-    await http.post(`/drivers/rides/${ride.value.id}/complete`)
+    await http.post(`/rides/${ride.value.id}/complete`)
     rideStore.stopPolling()
     toast.success('Perjalanan selesai! Pendapatanmu sudah masuk.')
     await driver.fetchEarnings()

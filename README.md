@@ -304,12 +304,24 @@ Salin `.env.example` menjadi `.env` lalu sesuaikan (`nuxt.config.ts → runtimeC
 
 | Variabel | Default | Keterangan |
 | --- | --- | --- |
-| `NUXT_PUBLIC_API_BASE` | `http://localhost:8000` | Base URL Laravel backend |
+| `NUXT_API_BASE` | `http://127.0.0.1:8000` | Base URL Laravel. **Bukan `PUBLIC`** — hanya dibaca server, tidak pernah sampai ke browser |
 | `NUXT_PUBLIC_USE_MOCK` | `true` | `true` = mock API bawaan, `false` = panggil Laravel |
 | `NUXT_PUBLIC_APP_URL` | `http://localhost:3000` | URL aplikasi |
 | `NUXT_PUBLIC_REALTIME_*` | - | Konfigurasi Pusher/Reverb (opsional) |
 
 **`.env` jangan pernah di-commit** — sudah ke-ignore, tapi tetap hati-hati saat `git add`.
+
+### Kenapa `NUXT_API_BASE` bukan `NUXT_PUBLIC_API_BASE`
+
+Browser tidak pernah memanggil Laravel secara langsung. Klien selalu memanggil
+`/api/v1/*` di origin yang sama, dan route catch-all
+`server/routes/api/v1/[...slug].ts` yang meneruskannya ke Laravel sambil
+menempelkan header `Authorization`.
+
+Kalau `apiBase` ada di `runtimeConfig.public`, ia dikirim ke browser di setiap
+respons dan bisa dibaca siapa pun yang membuka devtools — termasuk URL internal
+yang tidak perlu diketahui pengguna. Selain itu, proxy di server membuat CORS
+tidak diperlukan sama sekali.
 
 ---
 
@@ -317,20 +329,65 @@ Salin `.env.example` menjadi `.env` lalu sesuaikan (`nuxt.config.ts → runtimeC
 
 Semua panggilan frontend lewat `/api/v1/...`, yang **sama persis dengan path + method di `routes/api.php` Laravel**. Kalau backend aktif: set `NUXT_PUBLIC_USE_MOCK=false`, lalu file mock (`server/utils/mockApi/`) boleh dihapus **tanpa mengubah kode frontend**.
 
+### Autentikasi
+
+Pasangan token Laravel **tidak pernah sampai ke browser**.
+
+```
+Browser ──/api/v1/*──> server Nitro ──Bearer──> Laravel
+                  ↑                ↑
+        cookie httpOnly      NUXT_API_BASE (server-only)
+        ans_at + ans_rt
+```
+
+`server/routes/api/v1/[...slug].ts` yang memegang seluruhnya:
+
+1. Membaca `ans_at` (access) dan `ans_rt` (refresh) dari cookie httpOnly
+2. Menempelkan `Authorization: Bearer <access>` ke request ke Laravel
+3. Kalau Laravel menjawab 401 `token_expired`, memanggil `POST /auth/refresh`
+   lalu mengulang request — jadi 15 menit masa access token tidak berarti
+   pengguna terlempar ke halaman login
+4. Kalau jawabannya `unauthenticated` yang tidak bisa dipulihkan, cookie
+   dihapus supaya request berikutnya tidak membawa token mati
+5. Pada login/register, menyimpan pasangan token ke cookie lalu
+   **menghapusnya dari respons** — klien hanya menerima `user`
+
+Alasan token tidak diletakkan di `localStorage` atau state Pinia: keduanya bisa
+dibaca skrip yang berhasil masuk lewat XSS, dan aplikasi ini punya input bebas
+dari pengguna (alamat jemput, chat, komentar penilaian). Dengan token berhenti di
+server, skrip yang disuntik masih bisa mengirim request, tapi tidak bisa
+mengambil token.
+
+Konsekuensi kedua: URL backend tidak pernah dikirim ke browser, jadi **CORS
+tidak diperlukan** dan URL internal tidak bocor ke devtools.
+
+### Endpoint yang ter-cover
+
 Endpoint yang ter-cover (semua di `server/utils/apiRouter.ts`):
 
-| Group | Endpoint |
-| --- | --- |
-| Auth | `register`, `login`, `logout`, `me`, `profile`, `password`, `sessions` |
-| OTP | `auth/otp/verify`, `auth/otp/resend` |
-| Me | `me/summary`, `me/activity` |
-| Rides | `rides`, `rides/:id`, `rides/:id/route`, `rides/:id/cancel`, `rides/:id/rate`, `rides/:id/timeline`, `rides/active` |
-| Fare | `fares/quote` |
-| Driver | `drivers`, `drivers/nearby`, `drivers/me`, `drivers/me/status`, `drivers/me/location`, `drivers/me/earnings`, `drivers/jobs`, `drivers/jobs/:ride/accept`, `drivers/jobs/:ride/reject`, `drivers/rides/:ride/arrive\|start\|complete` |
-| Chat | `conversations`, `conversations/:id`, `messages/:conversation`, `conversations/:id/messages`, `conversations/:id/read` |
-| Notification | `notifications`, `notifications/read-all`, `notifications/:id/read` |
-| Payment | `payments`, `payments/qris`, `payments/webhook` |
-| Admin | `stats`, `activity`, `charts/*`, `top-drivers`, `users`, `rides`, `payments`, `reports`, `settings`, `drivers/:driver/verify` |
+| Group | Endpoint | Status |
+| --- | --- | --- |
+| Auth | `auth/register`, `auth/login`, `auth/logout`, `auth/me` | Ada di BE |
+| OTP | `auth/otp/verify`, `auth/otp/request` | Ada di BE |
+| Users | `users`, `users/:user` | Ada di BE (Pribadi lewat `users/:id`) |
+| Me | `me/summary`, `me/activity` | **Belum ada di BE** |
+| Rides | `rides`, `rides/:id`, `rides/:id/cancel`, `rides/:id/rating` | Ada di BE |
+| Rides | `rides/:id/route`, `rides/:id/assign` | **Belum ada di BE** |
+| Fare | `fares/quote` | Backend: `rides/preview`, bentuk field berbeda |
+| Driver | `driver/rides/nearby`, `rides/:id/accept\|arrive\|start\|complete` | Ada di BE |
+| Driver | `driver/profile/availability`, `driver/profile/location` | Ada di BE (PUT) |
+| Driver | `drivers/me`, `drivers`, `drivers/nearby`, `drivers/:id`, `drivers/me/earnings`, `drivers/jobs/:ride/reject` | **Belum ada di BE** |
+| Driver | `auth/sessions` | **Belum ada di BE** |
+| Chat | `conversations`, `conversations/:id`, `messages/:conversation`, `conversations/:id/messages`, `conversations/:id/read` | **Belum ada di BE** |
+| Notification | `notifications`, `notifications/read-all`, `notifications/:id/read` | **Belum ada di BE** |
+| Payment | `payments`, `payments/qris`, `payments/webhook` | **Belum ada di BE** (tunnel: `rides/:id/payment`) |
+| Admin | `admin/rides` → `rides`, `admin/users` → `users` | Ada di BE |
+| Admin | `stats`, `activity`, `charts/*`, `top-drivers`, `payments`, `reports`, `settings`, `drivers/:driver/verify`, `admin/rides/:ride` | **Belum ada di BE** |
+
+> **"Belum ada di BE" bukan berarti layar dibiarkan error.** Endpoint itu masih jalan
+> lewat mock, dan ditandai `TODO backend` di `server/utils/apiRouter.ts`. Kalau mock
+> dimatikan sementara endpoint itu belum dibangun, layarnya ikut hilang — bukan
+> mengirim permintaan yang pasti ditolak.
 
 Tambah endpoint baru? Update di **dua tempat**: `server/utils/apiRouter.ts` (mock) dan `Ajem-UDINUS-BE/routes/api.php` (Laravel). Kalau cuma salah satu, frontend bakal tidak sinkron dengan backend.
 
@@ -342,32 +399,57 @@ Frontend berjalan mandiri dengan mock API di `server/utils/mockApi/*` yang **men
 Saat backend aktif: set `NUXT_PUBLIC_USE_MOCK=false` — file mock boleh dihapus tanpa mengubah kode frontend.
 Perubahan kontrak terhadap versi lama tercatat di bawah.
 
+> **Klaim "meniru 1:1" ini tidak lagi tepat, dan sudah dibetulkan.** Setelah routes
+> kedua repo dibandingkan satu per satu, dari 66 endpoint FE hanya 9 yang punya
+> path+method identik dengan BE, dan tidak satu pun dari 9 itu kontrak payload
+> yang sama. Tabel status di [Kontrak API](#kontrak-api) sekarang menyatakan yang
+> mana yang benar-benar ada di BE dan mana yang belum.
+
 ### 1. Naming & role
 
 | Lama | Baru |
 | --- | --- |
 | route `/rider/*`, role `rider` | route **`/customer/*`**, role **`customer`** |
 | field `rider_id`, `rider_name`, `rider_rating` | **`customer_id`**, **`customer_name`**, **`customer_rating`** |
-| cookie `aj_session` | **`ans_session`** |
-| token mock `aj_mock_*` | **`ans_mock_*`** |
+| cookie `aj_session` / `ans_session` | **dihapus** — diganti `ans_at` + `ans_rt` milik server (lihat §Autentikasi) |
+| token mock `aj_mock_*` | **dihapus** — token hanya ada di cookie httpOnly server |
 | kode trip `AJ-…` | **`ASN-…`** |
 | promo `AJHEMAT30` | **`ANSIAN30`** |
 | cancel reason `rider_cancel` | **`customer_cancel`** |
 | kendaraan `motorcycle/car/van` | **`motorcycle` saja** |
 | pembayaran `cash/qris/midtrans/xendit/wallet` | **`cash` + `qris` saja** (tanpa gateway/`checkout_url`) |
 
-### 2. Auth + OTP (endpoint baru/berubah)
+### 2. Auth + OTP — SUDAH SESUAI BACKEND
 
-- `POST /auth/register` → **tidak mengembalikan sesi**. Balas:
-  `{ challenge_id, email_masked, expires_in: 300, dev_code? }` (status 200).
-  Field driver: **`student_id` (NIM), `campus`, `study_program?`, `vehicle_plate/color/model?`** — wajib `student_id`+`campus`.
-- `POST /auth/login` → cek password:
-  - cookie **`ans_device`** cocok (userId, 30 hari) → sesi normal `{ token, user }`
-  - selain itu → **challenge OTP** (format sama dengan register)
-- `POST /auth/otp/verify` `{ challenge_id, code }` → `{ token, user }`
-  - kode 6 digit, TTL 300 detik, maks 5 percobaan, salah → 422 + sisa percobaan
-  - sukses → set `email_verified_at` (purpose register), set cookie `ans_device` (30 hari), buat sesi
-- `POST /auth/otp/resend` `{ challenge_id }` → challenge baru; throttle 60 detik (429)
+Bagian ini sebelumnya menggambarkan model mock (tantangan OTP saat login).
+Model itu dibuang karena tidak punya padanan di Laravel.
+
+**Bentuk sekarang, mengikuti `Ajem-UDINUS-BE/routes/api.php`:**
+
+| Endpoint | Bentuk |
+| --- | --- |
+| `POST /auth/register` | 201 + `{ access_token, refresh_token, user }`. Email **belum** terverifikasi |
+| `POST /auth/login` | 200 + `{ access_token, refresh_token, user }`. Tidak ada tantangan |
+| `POST /auth/otp/request` | `{ email, purpose }`. Membalas sama apakah email terdaftar atau tidak |
+| `POST /auth/otp/verify` | `{ email, purpose, code }`. Hanya mengisi `email_verified_at` — **tidak mengembalikan token** |
+| `POST /auth/refresh` | Dipanggil server otomatis saat 401 `token_expired` |
+
+Yang berubah di sisi FE:
+
+- **Tidak ada `challenge_id` lagi.** Backend mengenali email + `purpose`, bukan
+  id tantangan buatan mock
+- **Tidak ada cookie `ans_device` (trust device) lagi.** Sanctum tidak punya
+  konsepnya, dan "perangkat ini sudah dipercaya" yang disimpan di browser adalah
+  jalan pintas yang tidak bisa dicabut dari sisi server
+- **Kode OTP tidak pernah tampil di layar.** Backend memang tidak pernah
+  mengirimnya di respons; sampai `MAIL_MAILER` diganti SMTP, kodenya hanya
+  masuk ke `storage/logs/laravel.log` milik backend
+- **`role` dan `phone` tidak dikirim saat register.** `AuthController::register`
+  menulis `UserRole::User` tanpa membaca permintaan, jadi `role: 'driver'` akan
+  diabaikan diam-diam
+- **Field driver (`student_id`, `campus`, `study_program`) belum dikirim.**
+  Belum ada kolomnya di backend. Form `/driver/daftar` tetap mengumpulkan isian,
+  tapi isian itu belum dikirim ke mana pun
 
 ### 3. Tarif zona (satu sumber kebenaran: `shared/utils/pricing.ts`)
 

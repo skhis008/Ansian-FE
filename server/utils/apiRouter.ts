@@ -46,17 +46,26 @@ const routes: Route[] = [
   route('POST', '/api/v1/auth/register', auth.register),
   route('POST', '/api/v1/auth/login', auth.login),
   route('POST', '/api/v1/auth/otp/verify', auth.verifyOtp),
-  route('POST', '/api/v1/auth/otp/resend', auth.resendOtp),
+  route('POST', '/api/v1/auth/otp/request', auth.requestOtp),
   route('POST', '/api/v1/auth/logout', auth.logout),
   route('GET', '/api/v1/auth/me', auth.me),
-  route('PATCH', '/api/v1/auth/profile', auth.updateProfile),
-  route('PATCH', '/api/v1/auth/password', auth.updatePassword),
+  // TODO backend: BE tidak punya `auth/sessions`. Token Sanctum tidak punya
+  // endpoint "daftar sesi", jadi layar ini akan hilang saat mock dimatikan.
   route('GET', '/api/v1/auth/sessions', auth.sessions),
+
+
+  /* ---------- USERS ---------- */
+  // Cerminan `Route::apiResource('users', ...)` + Aturan UserPolicy: daftar dan
+  // hapus admin saja, ubah boleh admin atau pemilik akunnya sendiri.
+  route('GET', '/api/v1/users', admin.listUsers),
+  route('POST', '/api/v1/users', admin.storeUser),
+  route('GET', '/api/v1/users/:user', admin.showUser),
+  route('PUT', '/api/v1/users/:user', admin.updateUser),
+  route('PATCH', '/api/v1/users/:user', admin.updateUser),
+  route('DELETE', '/api/v1/users/:user', admin.deleteUser),
 
   /* ---------- ME ---------- */
   route('GET', '/api/v1/me/summary', auth.homeSummary),
-  route('GET', '/api/v1/me/activity', auth.activity),
-  route('GET', '/api/v1/rides/active', rides.getActiveRide),
 
   /* ---------- FARES ---------- */
   route('POST', '/api/v1/fares/quote', rides.quoteFare),
@@ -67,24 +76,27 @@ const routes: Route[] = [
   route('GET', '/api/v1/rides/:ride', rides.showRide),
   route('GET', '/api/v1/rides/:ride/route', rides.rideRoute),
   route('POST', '/api/v1/rides/:ride/cancel', rides.cancelRide),
-  route('POST', '/api/v1/rides/:ride/rate', rides.rateRide),
-  route('GET', '/api/v1/rides/:ride/timeline', rides.rideTimeline),
+  route('POST', '/api/v1/rides/:ride/rating', rides.rateRide),
   route('POST', '/api/v1/rides/:ride/assign', rides.assignDriver),
 
   /* ---------- DRIVER ---------- */
   route('GET', '/api/v1/drivers', rides.listDrivers),
   route('GET', '/api/v1/drivers/nearby', rides.nearbyDrivers),
   route('PATCH', '/api/v1/drivers/me', rides.updateMyDriverProfile),
-  route('POST', '/api/v1/drivers/me/status', rides.setDriverStatus),
-  route('POST', '/api/v1/drivers/me/location', rides.updateDriverLocation),
+  route('PUT', '/api/v1/driver/profile/availability', rides.setDriverAvailability),
+  route('PUT', '/api/v1/driver/profile/location', rides.updateDriverLocation),
   route('GET', '/api/v1/drivers/me/earnings', rides.myEarnings),
-  route('GET', '/api/v1/drivers/jobs', rides.listJobs),
-  route('POST', '/api/v1/drivers/jobs/:ride/accept', rides.acceptJob),
+  route('GET', '/api/v1/driver/rides/nearby', rides.listNearbyRides),
+  // TODO backend: BE tidak punya endpoint penolakan tawaran. Yang ada hanya
+  // `POST /rides/{ride}/accept`; driver yang menolak berarti tidak menekan apa pun.
+  // Sampai endpointnya dibangun, aksi "tolak" di FE hanya berarti permintaan itu
+  // hilang dari daftar terdekat — bukan dikirim ke Laravel yang tidak menerimanya.
   route('POST', '/api/v1/drivers/jobs/:ride/reject', rides.rejectJob),
+  route('POST', '/api/v1/rides/:ride/accept', rides.acceptJob),
   route('GET', '/api/v1/drivers/:driver', rides.showDriver),
-  route('POST', '/api/v1/drivers/rides/:ride/arrive', rides.markArrived),
-  route('POST', '/api/v1/drivers/rides/:ride/start', rides.startRide),
-  route('POST', '/api/v1/drivers/rides/:ride/complete', rides.completeRide),
+  route('POST', '/api/v1/rides/:ride/arrive', rides.markArrived),
+  route('POST', '/api/v1/rides/:ride/start', rides.startRide),
+  route('POST', '/api/v1/rides/:ride/complete', rides.completeRide),
 
   /* ---------- CHAT ---------- */
   route('GET', '/api/v1/conversations', rides.listConversations),
@@ -109,15 +121,15 @@ const routes: Route[] = [
   /* ---------- ADMIN ---------- */
   route('GET', '/api/v1/admin/stats', admin.stats),
   route('GET', '/api/v1/admin/activity', admin.adminActivity),
-  route('GET', '/api/v1/admin/charts/rides', admin.chartRides),
-  route('GET', '/api/v1/admin/charts/revenue', admin.chartRevenue),
+  route('GET', '/api/v1/admin/charts/daily', admin.chartDaily),
   route('GET', '/api/v1/admin/charts/vehicle-type', admin.chartVehicleType),
   route('GET', '/api/v1/admin/top-drivers', admin.topDrivers),
-  route('GET', '/api/v1/admin/users', admin.listUsers),
-  route('GET', '/api/v1/admin/users/:user', admin.showUser),
-  route('PATCH', '/api/v1/admin/users/:user', admin.updateUser),
-  route('DELETE', '/api/v1/admin/users/:user', admin.deleteUser),
   route('GET', '/api/v1/admin/rides', admin.adminListRides),
+  // TODO backend: tidak ada padanan di BE. Backend sengaja memakai satu endpoint
+  // per transisi (`accept`/`arrive`/`start`/`complete`/`cancel`) supaya tidak ada
+  // jalan pintas yang bisa melompati langkah, dan administrator pun tidak boleh
+  // Designated status seenhack. Layar edit status admin ikut hilang, bukan
+  // dikirim ke Laravel yang tidak akan menerimanya.
   route('PATCH', '/api/v1/admin/rides/:ride', admin.adminUpdateRide),
   route('GET', '/api/v1/admin/payments', admin.adminListPayments),
   route('GET', '/api/v1/admin/reports', admin.adminReports),

@@ -66,13 +66,14 @@ async function submit() {
   if (!validate()) return
 
   try {
+    /* `phone` dan `role` tidak ikut dikirim: `RegisterUserRequest` tidak punya
+       keduanya, dan peran selalu `user` dari sisi server — mengirim role dari
+       klien berarti klien yang menentukan peran, bukan server. */
     await auth.register({
       name: form.name,
       email: form.email,
-      phone: form.phone,
       password: form.password,
       password_confirmation: form.password_confirmation,
-      role: 'customer',
     })
     toast.success('Kode verifikasi dikirim ke email kamu.')
     await navigateTo('/verifikasi')

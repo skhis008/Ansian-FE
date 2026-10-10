@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { isRideCancelled, normalizeRides } from '#shared/types'
+import type { ChartPoint, RideResourceShape } from '#shared/types'
 import { formatRupiah, formatRelative } from '#shared/utils/format'
 
 definePageMeta({ layout: 'app' })
@@ -10,18 +12,38 @@ const chat = useChatStore()
 
 useSeoMeta({ title: 'Beranda', robots: 'noindex, nofollow' })
 
+type PassengerSummary = {
+  role: 'user'
+  total_rides: number
+  active_rides: number
+  completed_rides: number
+  cancelled_rides: number
+  rides_today: number
+  total_spent: number
+  currency: string
+  series: ChartPoint[]
+}
+
 const { data: summary } = await useAsyncData('customer-summary', () =>
-  http.get<{ data: any }>('/me/summary').then(r => r.data),
+  http.get<{ data: PassengerSummary }>('/me/summary').then(r => r.data),
 )
 
-const { data: activity } = await useAsyncData('customer-activity', () =>
-  http.get<{ data: any[] }>('/me/activity').then(r => r.data),
-)
+/*
+ * Riwayat diambil dari `GET /rides`, bukan dari endpoint `/me/activity` yang
+ * pernah ada. `rides` sudah dibatasi backend ke perjalanan milik orang yang
+ * masuk — penumpang melihat miliknya, driver melihat miliknya — jadi endpoint
+ * kedua hanya mengulang aturan yang sama dengan bentuk berbeda.
+ */
+const { data: recent } = await useAsyncData('customer-recent', async () => {
+  const r = await http.get<{ data?: RideResourceShape[] }>('/rides', { per_page: 5 })
+  return normalizeRides(r)
+})
 
 const { data: active } = await useAsyncData('customer-active', async () => {
-  const r = await http.get<{ data: any }>('/rides/active')
-  rideStore.setActive(r.data)
-  return r.data
+  const r = await http.get<{ data?: RideResourceShape[] }>('/rides', { scope: 'active', per_page: 1 })
+  const ride = normalizeRides(r)[0] ?? null
+  rideStore.setActive(ride)
+  return ride
 })
 
 function copyPromo() {
@@ -37,8 +59,8 @@ const quickActions = [
 
 const stats = computed(() => [
   { label: 'Perjalanan', value: summary.value?.total_rides ?? 0, icon: 'navigation', tone: 'text-brand-600 bg-brand-50' },
-  { label: 'Total transaksi', value: formatRupiah(summary.value?.total_spent ?? 0), icon: 'wallet', tone: 'text-emerald-600 bg-emerald-50' },
-  { label: 'Poin', value: (summary.value?.points ?? 0).toLocaleString('id-ID'), icon: 'gift', tone: 'text-violet-600 bg-violet-50' },
+  { label: 'Selesai', value: summary.value?.completed_rides ?? 0, icon: 'chart', tone: 'text-emerald-600 bg-emerald-50' },
+  { label: 'Total transaksi', value: formatRupiah(summary.value?.total_spent ?? 0), icon: 'wallet', tone: 'text-violet-600 bg-violet-50' },
 ])
 </script>
 
@@ -118,26 +140,26 @@ const stats = computed(() => [
           </template>
         </AppPageHeader>
 
-        <div v-if="!activity?.length" class="rounded-2xl border border-ink-200 bg-white p-8 text-center">
+        <div v-if="!recent?.length" class="rounded-2xl border border-ink-200 bg-white p-8 text-center">
           <p class="text-sm text-ink-500">Belum ada aktivitas. Yuk pesan pertama kamu!</p>
         </div>
 
         <div v-else class="space-y-2.5">
           <NuxtLink
-            v-for="a in activity.slice(0, 5)"
+            v-for="a in recent.slice(0, 5)"
             :key="a.id"
             :to="`/customer/rides/${a.id}`"
             class="flex items-center gap-3 rounded-2xl border border-ink-200/80 bg-white p-3.5 transition hover:border-brand-300 hover:shadow-soft"
           >
             <span
               class="grid size-9 shrink-0 place-items-center rounded-xl"
-              :class="a.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : a.status === 'cancelled' || a.status === 'failed' ? 'bg-red-50 text-red-600' : 'bg-brand-50 text-brand-600'"
+              :class="a.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : isRideCancelled(a.status) ? 'bg-red-50 text-red-600' : 'bg-brand-50 text-brand-600'"
             >
               <UiIcon name="navigation" class="size-4" />
             </span>
             <div class="min-w-0 flex-1">
               <p class="truncate text-sm font-semibold text-ink-900">
-                {{ a.pickup_name }} → {{ a.destination_name }}
+                {{ a.pickup.address }} → {{ a.destination.address }}
               </p>
               <p class="text-[11px] text-ink-500">{{ formatRelative(a.created_at) }}</p>
             </div>

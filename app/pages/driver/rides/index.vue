@@ -22,7 +22,9 @@ const TABS: { value: RideStatus | 'all'; label: string }[] = [
   { value: 'all', label: 'Semua' },
   { value: 'in_progress', label: 'Berjalan' },
   { value: 'completed', label: 'Selesai' },
-  { value: 'cancelled', label: 'Dibatalkan' },
+  { value: 'passenger_cancelled', label: 'Dibatalkan penumpang' },
+  { value: 'driver_cancelled', label: 'Dibatalkan driver' },
+  { value: 'no_driver_found', label: 'Tidak ada driver' },
 ]
 
 const filtered = computed(() => {

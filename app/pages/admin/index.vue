@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ChartPoint, DashboardStats, RideStatus, TopDriver } from '#shared/types'
+import type { ChartPoint, DashboardStats, RideStatus } from '#shared/types'
 import { formatRupiah, formatDateTime } from '#shared/utils/format'
 
 definePageMeta({ layout: 'app' })
@@ -10,21 +10,42 @@ const range = ref(14)
 
 const { data: stats, pending: loadingStats } = await useAsyncData(
   'admin-stats',
-  () => http.get<{ data: DashboardStats }>('/admin/stats').then(r => r.data),
-)
-
-const { data: rideSeries } = await useAsyncData(
-  'admin-chart-rides',
-  () => http.get<{ data: ChartPoint[] }>('/admin/charts/rides', { days: range.value }).then(r => r.data),
+  () => http.get<{ data: DashboardStats }>('/admin/stats', { days: range.value }).then(r => r.data),
   { watch: [range] },
 )
 
-const { data: revenueSeries } = await useAsyncData(
-  'admin-chart-revenue',
-  () => http.get<{ data: Array<{ date: string; label: string; gross: number; net: number }> }>(
-    '/admin/charts/revenue',
-    { days: range.value },
-  ).then(r => r.data),
+type TopDriver = {
+  id: number
+  name: string
+  avatar_url: string | null
+  vehicle_plate: string | null
+  total_rides: number
+  gmv: number
+  collected_cash: number
+}
+
+type ActivityEntry = {
+  id: number
+  ride_id: number
+  ride_code: string | null
+  from_status: RideStatus | null
+  to_status: RideStatus
+  to_status_label: string
+  changed_by_role: string
+  changed_by_name: string | null
+  fare: number
+  customer_name: string | null
+  driver_name: string | null
+  at: string | null
+}
+
+/*
+ * Backend hanya punya satu deret harian: perjalanan per hari dan GMV per hari
+ * bukan dua kumpulan data, cuma dua pembacaan dari yang sama.
+ */
+const { data: daily } = await useAsyncData(
+  'admin-chart-daily',
+  () => http.get<{ data: ChartPoint[] }>('/admin/charts/daily', { days: range.value }).then(r => r.data),
   { watch: [range] },
 )
 
@@ -33,26 +54,16 @@ const { data: topDrivers } = await useAsyncData(
   () => http.get<{ data: TopDriver[] }>('/admin/top-drivers').then(r => r.data),
 )
 
-type AdminActivity = {
-  id: number
-  ride_code: string
-  status: RideStatus
-  fare: number
-  customer_name: string
-  driver_name: string
-  created_at: string
-}
-
 const { data: activity } = await useAsyncData(
   'admin-activity',
-  () => http.get<{ data: AdminActivity[] }>('/admin/activity').then(r => r.data),
+  () => http.get<{ data: ActivityEntry[] }>('/admin/activity').then(r => r.data),
 )
 
 const ridesChart = computed(() =>
-  (rideSeries.value ?? []).map(p => ({ label: p.label, value: p.rides })),
+  (daily.value ?? []).map(p => ({ label: p.label, value: p.rides })),
 )
-const revenueChart = computed(() =>
-  (revenueSeries.value ?? []).map(p => ({ label: p.label, value: p.net })),
+const gmvChart = computed(() =>
+  (daily.value ?? []).map(p => ({ label: p.label, value: p.gmv })),
 )
 
 const KPIS = computed(() => {
@@ -60,35 +71,44 @@ const KPIS = computed(() => {
   if (!s) return []
   return [
     {
-      label: 'Perjalanan Bulan Ini',
-      value: s.total_rides.toLocaleString('id-ID'),
+      label: 'Perjalanan (periode)',
+      value: s.rides_in_period.toLocaleString('id-ID'),
       delta: s.rides_change_pct,
       icon: 'navigation',
       tone: 'brand',
     },
     {
-      label: 'GMV Bulan Ini',
-      value: formatRupiah(s.gmv_month),
+      label: 'GMV (perjalanan selesai)',
+      value: formatRupiah(s.gmv_in_period),
       delta: s.gmv_change_pct,
       icon: 'wallet',
       tone: 'emerald',
     },
     {
-      label: 'Pendapatan Platform',
-      value: formatRupiah(s.revenue_month),
-      delta: s.gmv_change_pct,
-      icon: 'trending-up',
+      label: 'Driver Online',
+      value: s.online_drivers.toLocaleString('id-ID'),
+      delta: 0,
+      icon: 'bike',
       tone: 'indigo',
     },
     {
-      label: 'Pengguna Aktif',
-      value: s.total_users.toLocaleString('id-ID'),
-      delta: s.users_change_pct,
-      icon: 'users',
+      label: 'Rating Rata-rata',
+      value: s.average_driver_rating.toFixed(2),
+      delta: 0,
+      icon: 'star',
       tone: 'amber',
     },
   ]
 })
+
+/*
+ * Kartu "Pendapatan Platform" dihapus.
+ *
+ * ADR-035 di backend menetapkan uang tidak pernah singgah di aplikasi, jadi
+ * tidak ada komisi dan tidak ada pendapatan platform yang bisa dihitung.
+ * Menampilkan "Rp0" akan terlihat seperti bisnis yang belum untung, padahal
+ * memang tidak ada angka itu sama sekali. Lihat ADR-038.
+ */
 
 const TONES: Record<string, string> = {
   brand: 'bg-brand-50 text-brand-600',
@@ -142,11 +162,12 @@ const TONES: Record<string, string> = {
     </div>
 
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      <UiCard v-for="s in [
+      <UiCard
+v-for="s in [
         { label: 'Driver Online', value: `${stats?.online_drivers ?? 0}`, hint: `dari ${stats?.drivers ?? 0} driver` },
         { label: 'Perjalanan Aktif', value: `${stats?.active_rides ?? 0}`, hint: 'sedang berjalan' },
-        { label: 'Rata-rata Rating', value: (stats?.avg_rating ?? 0).toFixed(2), hint: 'seluruh driver' },
-        { label: 'Keluhan Tertunda', value: `${stats?.pending_complaints ?? 0}`, hint: 'perlu ditinjau' },
+        { label: 'Rata-rata Rating', value: (stats?.average_driver_rating ?? 0).toFixed(2), hint: 'driver yang sudah dinilai' },
+        { label: 'Pelanggan', value: `${stats?.customers ?? 0}`, hint: `dari ${stats?.total_users ?? 0} pengguna` },
       ]" :key="s.label">
         <p class="text-[11.5px] text-ink-500">{{ s.label }}</p>
         <p class="mt-1 text-lg font-bold text-ink-900">{{ s.value }}</p>
@@ -166,11 +187,11 @@ const TONES: Record<string, string> = {
 
       <UiCard>
         <div class="mb-4 flex items-center justify-between">
-          <h3 class="text-sm font-bold text-ink-900">Pendapatan Platform</h3>
-          <UiBadge tone="brand">net 8%</UiBadge>
+          <h3 class="text-sm font-bold text-ink-900">GMV Harian</h3>
+          <UiBadge tone="brand">perjalanan selesai</UiBadge>
         </div>
-        <ChartsLineChart v-if="revenueChart.length" :series="revenueChart" value-prefix="Rp " color="#4f46e5" />
-        <AppEmptyState v-else title="Belum ada data" description="Grafik muncul setelah ada transaksi." />
+        <ChartsLineChart v-if="gmvChart.length" :series="gmvChart" value-prefix="Rp " color="#4f46e5" />
+        <AppEmptyState v-else title="Belum ada data" description="Grafik muncul setelah ada perjalanan selesai." />
       </UiCard>
     </div>
 
@@ -186,13 +207,13 @@ const TONES: Record<string, string> = {
             <UiAvatar :name="d.name" :src="d.avatar_url" :size="34" />
             <div class="min-w-0 flex-1">
               <p class="truncate text-[13px] font-semibold text-ink-900">{{ d.name }}</p>
-              <p class="text-[11px] text-ink-400">{{ d.vehicle_plate }} · {{ d.total_rides }} perjalanan</p>
+              <p class="text-[11px] text-ink-400">
+                {{ d.vehicle_plate ?? 'Tanpa kendaraan' }} · {{ d.total_rides }} perjalanan
+              </p>
             </div>
             <div class="text-right">
-              <p class="text-[12.5px] font-bold text-ink-900">{{ formatRupiah(d.earnings) }}</p>
-              <p class="flex items-center justify-end gap-0.5 text-[11px] text-amber-600">
-                <UiIcon name="star" class="size-3" />{{ d.rating.toFixed(1) }}
-              </p>
+              <p class="text-[12.5px] font-bold text-ink-900">{{ formatRupiah(d.gmv) }}</p>
+              <p class="text-[11px] text-ink-400">GMV selesai</p>
             </div>
           </li>
           <li v-if="!topDrivers?.length" class="px-5 py-8 text-center text-[13px] text-ink-400">
@@ -210,30 +231,36 @@ const TONES: Record<string, string> = {
           <table class="w-full text-left">
             <thead>
               <tr class="border-b border-ink-100 text-[11px] tracking-wide text-ink-400 uppercase">
-                <th class="px-5 py-2.5 font-semibold">Kode</th>
+                <th class="px-5 py-2.5 font-semibold">Perjalanan</th>
                 <th class="px-3 py-2.5 font-semibold">Pelanggan</th>
                 <th class="px-3 py-2.5 font-semibold">Driver</th>
-                <th class="px-3 py-2.5 font-semibold">Status</th>
+                <th class="px-3 py-2.5 font-semibold">Perubahan Status</th>
                 <th class="px-3 py-2.5 text-right font-semibold">Tarif</th>
                 <th class="px-5 py-2.5 text-right font-semibold">Waktu</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="a in activity ?? []" :key="a.id" class="border-b border-ink-50 last:border-0">
-                <td class="px-5 py-2.5 font-mono text-[12px] text-ink-700">{{ a.ride_code }}</td>
-                <td class="max-w-[10rem] truncate px-3 py-2.5 text-[12.5px] text-ink-700">{{ a.customer_name }}</td>
-                <td class="max-w-[10rem] truncate px-3 py-2.5 text-[12.5px] text-ink-500">{{ a.driver_name }}</td>
+                <td class="px-5 py-2.5 font-mono text-[12px] text-ink-700">{{ a.ride_code ?? '-' }}</td>
+                <td class="max-w-[10rem] truncate px-3 py-2.5 text-[12.5px] text-ink-700">
+                  {{ a.customer_name ?? '-' }}
+                </td>
+                <td class="max-w-[10rem] truncate px-3 py-2.5 text-[12.5px] text-ink-500">
+                  {{ a.driver_name ?? '-' }}
+                </td>
                 <td class="px-3 py-2.5">
-                  <RideStatusBadge :status="a.status" size="sm" />
+                  <span v-if="a.from_status" class="text-[11px] text-ink-400 line-through">{{ a.from_status }}</span>
+                  <span v-if="a.from_status" class="mx-1 text-[11px] text-ink-300">&rarr;</span>
+                  <RideStatusBadge :status="a.to_status" size="sm" />
                 </td>
                 <td class="px-3 py-2.5 text-right text-[12.5px] font-semibold text-ink-900">
-                  {{ formatRupiah(a.fare) }}
+                  {{ a.fare ? formatRupiah(a.fare) : '-' }}
                 </td>
-                <td class="px-5 py-2.5 text-right text-[11.5px] text-ink-400">{{ formatDateTime(a.created_at) }}</td>
+                <td class="px-5 py-2.5 text-right text-[11.5px] text-ink-400">{{ formatDateTime(a.at) }}</td>
               </tr>
               <tr v-if="!activity?.length">
                 <td colspan="6" class="px-5 py-10 text-center text-[13px] text-ink-400">
-                  Belum ada aktivitas perjalanan.
+                  Belum ada perubahan status perjalanan.
                 </td>
               </tr>
             </tbody>
@@ -259,8 +286,8 @@ const TONES: Record<string, string> = {
       </UiCard>
       <UiCard>
         <p class="text-[11.5px] text-ink-500">Rata-rata Tarif</p>
-        <p class="mt-1 text-lg font-bold text-ink-900">{{ formatRupiah(stats?.avg_fare ?? 0) }}</p>
-        <p class="mt-1 text-[11px] text-ink-400">GMV hari ini {{ formatRupiah(stats?.gmv_today ?? 0) }}</p>
+        <p class="mt-1 text-lg font-bold text-ink-900">{{ formatRupiah(stats?.average_fare ?? 0) }}</p>
+        <p class="mt-1 text-[11px] text-ink-400">dari perjalanan selesai dalam periode</p>
       </UiCard>
     </div>
 

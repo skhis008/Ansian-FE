@@ -14,15 +14,28 @@ const auth = useAuthStore()
 const route = useRoute()
 const toast = useToast()
 
-const form = reactive({ email: '', password: '', remember: true })
+const form = reactive({ email: '', password: '' })
 const errors = ref<Record<string, string>>({})
 const serverError = ref('')
 const showPassword = ref(false)
 
+/**
+ * Akun demo.
+ *
+ * Email dan password di sini milik SEEDER BACKEND (`Ajem-UDINUS-BE`), bukan
+ * milik mock. Sebelumnya masih `@ansian.id` dan password `password`, yang
+ * tidak ada di Laravel — jadi menekan tombolnya selalu berakhir 401 dengan
+ * "Email atau password salah", dan yang benar-benar terjadi (akunnya memang
+ * tidak ada) tidak terbaca.
+ *
+ * Kalau nanti mock dinyalakan lagi (setiap akun mock punya password berbeda),
+ * daftar ini harus dibalik — satu daftar untuk dua backend yang berbeda akan
+ * meledak begitu salah satunya mati.
+ */
 const demoAccounts = [
-  { role: 'Pelanggan', email: 'customer@ansian.id', password: 'password', icon: 'user', tone: 'bg-brand-50 text-brand-600' },
-  { role: 'Driver', email: 'driver@ansian.id', password: 'password', icon: 'bike', tone: 'bg-emerald-50 text-emerald-600' },
-  { role: 'Admin', email: 'admin@ansian.id', password: 'admin123', icon: 'shield', tone: 'bg-violet-50 text-violet-600' },
+  { role: 'Pelanggan', email: 'user@ajem-be.test', password: 'password123', icon: 'user', tone: 'bg-brand-50 text-brand-600' },
+  { role: 'Driver', email: 'driver@ajem-be.test', password: 'password123', icon: 'bike', tone: 'bg-emerald-50 text-emerald-600' },
+  { role: 'Admin', email: 'admin@ajem-be.test', password: 'password123', icon: 'shield', tone: 'bg-violet-50 text-violet-600' },
 ]
 
 function fill(account: (typeof demoAccounts)[number]) {
@@ -41,16 +54,35 @@ async function submit() {
   if (Object.keys(errors.value).length) return
 
   try {
-    const user = await auth.login(form.email, form.password, form.remember)
-    if (!user) {
-      /* Perlu OTP — lanjut ke halaman verifikasi */
-      const redirect = route.query.redirect
-      await navigateTo({ path: '/verifikasi', query: typeof redirect === 'string' ? { redirect } : {} })
+    const user = await auth.login(form.email, form.password)
+    const redirect = route.query.redirect
+    const destination = typeof redirect === 'string' && redirect.startsWith('/') ? redirect : auth.homePath
+
+    /*
+     * Jangan navigasi kalau sesi ternyata belum berdiri.
+     *
+     * Middleware melempar ke `/login` setiap kali `isAuthenticated` false, jadi
+     * navigasi ke beranda tanpa memeriksa kondisi itu berakhir sebagai bouncing
+     * bolak-balik yang tidak pernah menjelaskan apa pun ke pengguna. Di sini
+     * kesalahannya ditampilkan sebagai pesan biasa saja.
+     */
+    if (!auth.isAuthenticated || !user) {
+      serverError.value =
+        'Login diterima tapi sesi tidak terbentuk. Periksa cookie browser — kalau cookie diblokir, aplikasi ini tidak bisa menyimpan sesi.'
+      await auth.logout()
       return
     }
+
+    /* Email belum terverifikasi: pemesanan akan ditolak backend, jadi arahkan
+       ke layar OTP lebih dulu. Login tetap berhasil — yang belum selesai
+       hanyalah verifikasi. */
+    if (auth.verifyingEmail) {
+      await navigateTo({ path: '/verifikasi', query: { redirect: destination } })
+      return
+    }
+
     toast.success(`Selamat datang, ${user.name.split(' ')[0]}!`)
-    const redirect = route.query.redirect
-    await navigateTo(typeof redirect === 'string' && redirect.startsWith('/') ? redirect : auth.homePath)
+    await navigateTo(destination)
   } catch (e) {
     if (e instanceof ApiError) {
       serverError.value = e.message
@@ -110,8 +142,13 @@ async function submit() {
         </template>
       </UiInput>
 
-      <div class="flex items-center justify-between">
-        <UiSwitch v-model="form.remember" label="Ingat saya" />
+      <!--
+        Switch "Ingat saya" dihapus. Backend memberi refresh token 30 hari tanpa
+        regard, jadi switch itu tidak mengubah apa pun — dan kontrol yang tidak
+        melakukan sesuatu lebih buruk daripada tidak ada, karena orang mengira
+        sesinya lebih aman atau lebih pendek dari kenyataan.
+      -->
+      <div class="flex items-center justify-end">
         <NuxtLink to="/faq#lupa-password" class="text-[13px] font-semibold text-brand-600 hover:underline">
           Lupa password?
         </NuxtLink>
@@ -124,7 +161,10 @@ async function submit() {
 
     <div class="my-6 flex items-center gap-3">
       <span class="h-px flex-1 bg-ink-200" />
-      <span class="text-xs font-medium text-ink-400">Akun demo — klik untuk isi otomatis</span>
+      <span class="text-xs font-medium text-ink-400">
+        Akun demo — klik untuk isi otomatis
+        <span class="block text-[11px] font-normal text-ink-300">akun seeder backend, password: password123</span>
+      </span>
       <span class="h-px flex-1 bg-ink-200" />
     </div>
 

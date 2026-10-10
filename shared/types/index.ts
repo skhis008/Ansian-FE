@@ -11,7 +11,16 @@
 
 /* ---------- Enums (harus sama dengan value di Laravel) ---------- */
 
-export const USER_ROLES = ['customer', 'driver', 'admin'] as const
+/**
+ * Role pengguna, mengikuti `App\Enums\UserRole` di `Ajem-UDINUS-BE`.
+ *
+ * Peran penumpangnya bernama **`user`**, bukan `customer`. Alasannya ada di
+ * ADR-011 pada `docs/DECISIONS.md` sisi backend: peran itu hanya menyatakan
+ * "bukan admin dan bukan driver", dan menamainya `customer` akan berbenturan
+ * dengan istilah yang di tempat lain sudah dipakai untuk orang yang memesan
+ * perjalanan.
+ */
+export const USER_ROLES = ['user', 'driver', 'admin'] as const
 export type UserRole = (typeof USER_ROLES)[number]
 
 export const USER_STATUSES = ['active', 'pending', 'suspended'] as const
@@ -23,25 +32,104 @@ export type DriverStatus = (typeof DRIVER_STATUSES)[number]
 export const VEHICLE_TYPES = ['motorcycle'] as const
 export type VehicleType = (typeof VEHICLE_TYPES)[number]
 
+/**
+ * Status perjalanan, mengikuti `App\Enums\RideStatus` di `Ajem-UDINUS-BE`.
+ *
+ * Backend punya **sembilan** status, bukan tujuh. Yang FE sebelumnya punya
+ * (`cancelled`, `failed`) digantikan oleh empat status yang lebih spesifik:
+ * pembatalan tahu **siapa** yang membatalkan, dan kegagalan mencari driver
+ * dipisahkan dari kegagalan yang bisa dicoba lagi. Frontend yang memakai
+ * `cancelled` tanpa tahu siapa yang membatalkan akan menampilkan kalimat yang
+ * sama untuk dua kejadian yang berbeda.
+ *
+ * Tabel transisinya ada di `RIDE_NEXT` di bawah, bukan ditulis ulang di
+ * tiap layar.Menyalinnya berarti status baru bisa lolos ke satu layar dan tidak
+ * ke layar lain, dan tidak ada yang mengetahuinya.
+ */
 export const RIDE_STATUSES = [
   'searching',
   'driver_assigned',
   'driver_arrived',
   'in_progress',
   'completed',
-  'cancelled',
-  'failed',
+  'passenger_cancelled',
+  'driver_cancelled',
+  'no_driver_found',
+  'rejected',
 ] as const
 export type RideStatus = (typeof RIDE_STATUSES)[number]
 
 export const RIDE_STATUS_LABELS: Record<RideStatus, string> = {
   searching: 'Mencari driver',
-  driver_assigned: 'Driver ditugaskan',
-  driver_arrived: 'Driver tiba',
+  driver_assigned: 'Driver menuju lokasi',
+  driver_arrived: 'Driver sudah di lokasi',
   in_progress: 'Dalam perjalanan',
-  completed: 'Selesai',
-  cancelled: 'Dibatalkan',
-  failed: 'Gagal',
+  completed: 'Perjalanan selesai',
+  passenger_cancelled: 'Dibatalkan penumpang',
+  driver_cancelled: 'Dibatalkan driver',
+  no_driver_found: 'Tidak ada driver tersedia',
+  rejected: 'Mencari driver lagi',
+}
+
+/**
+ * Transisi yang diizinkan, cerminan `RideStatus::allowedNext()`.
+ *
+ * Backend menjawab `409 invalid_transition` kalau lompat langkah, jadi daftar
+ * ini untuk menentukan tombol mana yang tampil — bukan untuk memutuskan
+ * transisi. Yang menentukan tetap server.
+ */
+export const RIDE_NEXT: Record<RideStatus, readonly RideStatus[]> = {
+  searching: ['driver_assigned', 'passenger_cancelled', 'driver_cancelled', 'no_driver_found', 'rejected'],
+  driver_assigned: ['driver_arrived', 'passenger_cancelled', 'driver_cancelled'],
+  driver_arrived: ['in_progress', 'passenger_cancelled', 'driver_cancelled'],
+  in_progress: ['completed'],
+  // Driver yang ditolak kembali ke `searching`, dan itulah satu-satunya jalan
+  // keluar dari status ini.
+  rejected: ['searching'],
+  completed: [],
+  passenger_cancelled: [],
+  driver_cancelled: [],
+  no_driver_found: [],
+}
+
+/** Status yang tidak bisa ditinggalkan — cerminan `RideStatus::isTerminal()`. */
+export const RIDE_TERMINAL_STATUSES = [
+  'completed',
+  'passenger_cancelled',
+  'driver_cancelled',
+  'no_driver_found',
+] as const satisfies readonly RideStatus[]
+
+/** Status yang membatalkan perjalanan, dengan pelaku yang mengharuskannya. */
+export const RIDE_CANCELLED_STATUSES = ['passenger_cancelled', 'driver_cancelled', 'no_driver_found'] as const
+
+/** Status perjalanan yang masih berjalan — cerminan `RideStatus::isActive()`. */
+export const RIDE_ACTIVE_STATUSES = [
+  'searching',
+  'driver_assigned',
+  'driver_arrived',
+  'in_progress',
+] as const satisfies readonly RideStatus[]
+
+export function isRideCancelled(status: RideStatus): boolean {
+  return (RIDE_CANCELLED_STATUSES as readonly RideStatus[]).includes(status)
+}
+
+/**
+ * Perjalanan yang sudah selesai dan tidak akan bergerak lagi — selesai atau
+ * dibatalkan. Bedanya dengan `isRideCancelled`: perjalanan `completed` bukan
+ * pembatalan, tapi sama-sama tidak punya tombol berikutnya.
+ */
+export function isRideSettled(status: RideStatus): boolean {
+  return (RIDE_TERMINAL_STATUSES as readonly RideStatus[]).includes(status)
+}
+
+export function isRideActive(status: RideStatus): boolean {
+  return (RIDE_ACTIVE_STATUSES as readonly RideStatus[]).includes(status)
+}
+
+export function canRideTransitionTo(from: RideStatus, to: RideStatus): boolean {
+  return RIDE_NEXT[from].includes(to)
 }
 
 export const PAYMENT_METHODS = ['cash', 'qris'] as const
@@ -156,6 +244,8 @@ export interface User {
   email: string
   phone: string
   role: UserRole
+  /** Label Bahasa Indonesia dari backend (`UserRole::label()`). Tampilkan ini, bukan `role`. */
+  role_label?: string
   avatar_url: string | null
   status: UserStatus
   rating: number | null
@@ -166,8 +256,19 @@ export interface User {
   updated_at: string
 }
 
-export interface AuthSession {
-  token: string
+/**
+ * Hasil login atau registrasi yang berhasil.
+ *
+ * `access_token` dan `refresh_token` ada di kontrak backend, tapi TIDAK pernah
+ * sampai ke klien: route catch-all menyimpannya di cookie httpOnly dan
+ * menghapusnya dari respons sebelum dikirim ke browser. Field keduanya
+ * dicantumkan supaya bentuk responsnya terdokumentasi, bukan supaya dibaca.
+ */
+export interface AuthPayload {
+  access_token?: string
+  refresh_token?: string
+  token_type?: 'Bearer'
+  expires_in?: number
   user: User
 }
 
@@ -200,15 +301,34 @@ export interface DriverProfile {
 
 export interface Driver extends DriverProfile {
   user: User
+  /**
+   * Nama driver's account, diisi `normalizeRide` dari `RideResource` backend.
+   *
+   * Backend menyandikan `driver` ke user yang datanya sudah diratakan, jadi
+   * tidak ada objek `user` di dalamnya — sementara mock tetap menyimpan
+   * `user`. Dua-duanya dibaca di `RideCard`.
+   */
+  name?: string
 }
 
 /* ---------- Ride ---------- */
 
+/**
+ * Satu langkah riwayat status, mengikuti `RideStatusHistoryResource`.
+ *
+ * Backend mencatat **dari status mana ke status mana**, bukan sekadar status
+ * akhirnya. `from_status` membedakan dua kejadian yang kalau hanya ditulis
+ * status akhirnya akan terlihat sama, dan `changed_by_role` menandai siapa yang
+ * menekan tombolnya — bukan siapa yang disebut di catatan.
+ */
 export interface RideStatusHistory {
-  id: number
-  status: RideStatus
+  from_status: RideStatus | null
+  to_status: RideStatus
+  to_status_label: string
+  changed_by_role: 'passenger' | 'driver' | 'system'
+  changed_by_user_id: number | null
   note: string | null
-  created_at: string
+  at: string
 }
 
 export interface RideRating {
@@ -249,18 +369,28 @@ export interface Ride {
   updated_at: string
 }
 
+/**
+ * Pratinjau tarif dari `POST /api/v1/rides/preview`.
+ *
+ * Backend menghitung tarif dari tarif dasar plus kilometer, bukan dari zona.
+ * Bentuk ini ikut apa adanya supaya rincian yang tampil di layar ini sama
+ * persis dengan yang dipakai server saat memesan — README menyatakan itu sebagai
+ * syarat, bukan pilihan.
+ *
+ * `duration_min` tidak ada karena backend tidak menyimpannya.
+ */
 export interface FareQuote {
-  zone: 'green' | 'yellow' | 'orange' | 'red'
-  zone_label: string
-  zone_color: string
-  distance_km: number
-  duration_min: number
-  zone_fare: number
-  admin_fee: number
+  distance_meters: number
+  /** Kilometer yang ditagih, setelah pembulatan ke atas. */
+  billable_kilometres: number
+  base_fare: number
+  per_km_rate: number
+  minimum_fare: number
+  discount_amount: number
+  promo_code: string | null
+  surcharge: { code: string; name: string; kind: string; value: number; amount: number } | null
   total: number
   currency: string
-  route?: LatLng[]
-  nearest_drivers: number
 }
 
 export interface Payment {
@@ -274,13 +404,17 @@ export interface Payment {
   created_at: string
 }
 
-/** Tantangan kode verifikasi email (OTP 6 digit) — response register/login */
-export interface AuthChallenge {
-  challenge_id: string
-  email_masked: string
-  expires_in: number
-  /** Hanya dikirim pada mode mock/dev (tanpa SMTP) — production Laravel tidak mengirim field ini */
-  dev_code?: string
+/**
+ * Hasil permintaan kode OTP.
+ *
+ * Backend sengaja membalas bentuk yang sama apakah email-nya terdaftar atau
+ * tidak, jadi field ini tidak pernah bisa dipakai untuk menebak keberadaan
+ * sebuah akun. `_dev_code` hanya ada di mock dan TIDAK ADA di Laravel — kode OTP
+ * sungguhan hanya ditulis ke `storage/logs/laravel.log` sampai SMTP dipasang.
+ */
+export interface OtpRequestPayload {
+  data?: { expires_in?: number }
+  message?: string
 }
 
 /* ---------- Chat ---------- */
@@ -325,27 +459,35 @@ export interface AppNotification {
 
 /* ---------- Admin ---------- */
 
+/**
+ * Ringkasan dasbor, mengikuti `DashboardStatsSchema` di `Ajem-UDINUS-BE`.
+ *
+ * Field `revenue_today`, `revenue_month`, dan `pending_complaints` yang ada di
+ * versi sebelumnya DIHAPUS, bukan disembunyikan. ADR-038 di backend menjelaskan
+ * alasannya: ADR-035 menetapkan uang tidak pernah singgah di aplikasi, jadi
+ * tidak ada komisi yang bisa dihitung, dan pengaduan belum punya tabel.
+ *
+ * Menampilkan nol untuk keduanya juga bukan perbaikan, karena nol untuk klaim
+ * yang belum ada sama saja mengarang angka.
+ */
 export interface DashboardStats {
+  /** Sepanjang waktu, bukan mengikuti periode. */
   total_rides: number
-  rides_today: number
+  /** Perjalanan yang dibuat dalam periode yang diminta. */
+  rides_in_period: number
   total_users: number
   customers: number
   drivers: number
   online_drivers: number
-  pending_drivers: number
-  gmv_today: number
-  gmv_month: number
-  revenue_today: number
-  revenue_month: number
-  avg_fare: number
+  active_rides: number
+  /** Ongkos perjalanan **selesai**. Perjalanan dibatalkan tidak dihitung. */
+  gmv_in_period: number
+  average_fare: number
   completion_rate: number
   cancellation_rate: number
-  avg_rating: number
-  active_rides: number
-  pending_complaints: number
+  average_driver_rating: number
   rides_change_pct: number
   gmv_change_pct: number
-  users_change_pct: number
 }
 
 export interface ChartPoint {
@@ -361,11 +503,12 @@ export interface TopDriver {
   id: number
   name: string
   avatar_url: string | null
-  driver_code: string
-  vehicle_plate: string
+  vehicle_plate: string | null
   total_rides: number
-  rating: number
-  earnings: number
+  /** GMV dari perjalanan yang selesai. */
+  gmv: number
+  /** Setoran tunai yang dikumpulkan driver. QRIS tidak melewati aplikasi. */
+  collected_cash: number
 }
 
 export interface RevenueByVehicleType {
@@ -414,4 +557,113 @@ export interface DriverEarnings {
   trips_month: number
   average_fare: number
   series: ChartPoint[]
+}
+
+/* ---------- Normalisasi respons backend ---------- */
+
+/**
+ * Bentuk ride yang dikirim `RideResource` di backend.
+ *
+ * Beda dari `Ride` di atas pada tiga hal: tarifnya bersarang (`fare` objek,
+ * bukan angka), jarak dalam meter, dan pembayarannya tidak ada di ride sama
+ * sekali — pembayaran hidup di `/rides/{ride}/payment`.
+ */
+export interface RideResourceShape {
+  id: number
+  ride_code: string
+  status: RideStatus
+  status_label: string
+  active: boolean
+  fare: {
+    currency: string
+    distance_meters: number
+    base_fare: number
+    per_km_rate: number
+    minimum_fare: number
+    discount_amount: number
+    promo_code: string | null
+    total: number
+    surcharge: { code: string; name: string; kind: string; value: number; amount: number } | null
+  }
+  pickup: { address: string; lat: number; lng: number; note: string | null }
+  dropoff: { address: string; lat: number; lng: number; note: string | null }
+  passenger?: { id: number; name: string } | null
+  driver?: { id: number; name: string; rating: { average: number; count: number } } | null
+  vehicle?: { id: number; plate_number: string; brand: string; model: string; color: string } | null
+  vehicle_type?: { id: number; code: string; name: string } | null
+  cancellation?: { by: string; by_label: string; reason: string | null; at: string } | null
+  milestones: {
+    assigned_at: string | null
+    arrived_at: string | null
+    started_at: string | null
+    completed_at: string | null
+    cancelled_at: string | null
+  }
+  status_history: RideStatusHistory[]
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * Mengubah bentuk backend menjadi bentuk yang dipakai komponen.
+ *
+ * Dipisah ke satu fungsi supaya perbedaan kontrak ada di satu tempat. Kalau
+ * tiap komponen membaca field backend langsung, setiap perbedaan jadi error
+ * 500 di halaman yang berbeda — dan yang pertama baru terlihat saat halamannya
+ * dibuka, bukan saat kodenya ditulis.
+ *
+ * Yang TIDAK ada di backend dan karena itu dibiarkan kosong: durasi perjalanan,
+ * metode dan status pembayaran, serta nilai rating ride. Menebaknya berarti
+ * mengarang angka yang ditampilkan ke pengguna seolah berasal dari server.
+ */
+export function normalizeRide(raw: RideResourceShape): Ride {
+  const distanceKm = raw.fare.distance_meters / 1000
+  const driverRating = raw.driver?.rating
+
+  return {
+    id: raw.id,
+    ride_code: raw.ride_code,
+    status: raw.status,
+    service_type: 'instant',
+    scheduled_at: null,
+    pickup: { ...raw.pickup },
+    destination: { ...raw.dropoff },
+    pickup_note: raw.pickup.note,
+    distance_km: Number(distanceKm.toFixed(2)),
+    // Backend tidak menyimpan durasi. `0` berarti "tidak diketahui", dan
+    // komponen harus menampilkan itu — bukan mengarang angka.
+    duration_min: 0,
+    fare: raw.fare.total,
+    payment_method: null,
+    payment_status: null,
+    cancel_reason: null,
+    customer_id: raw.passenger?.id ?? 0,
+    driver_id: raw.driver?.id ?? null,
+    customer: raw.passenger ? ({ ...raw.passenger, role: 'user' } as User) : undefined,
+    driver: raw.driver
+      ? ({
+          id: raw.driver.id,
+          user_id: raw.passenger?.id ?? 0,
+          name: raw.driver.name,
+          rating: driverRating?.average ?? 0,
+          rating_count: driverRating?.count ?? 0,
+          vehicle_plate: raw.vehicle?.plate_number ?? '',
+          vehicle_color: raw.vehicle?.color ?? '',
+          vehicle_model: [raw.vehicle?.brand, raw.vehicle?.model].filter(Boolean).join(' '),
+        } as unknown as Driver)
+      : null,
+    rating: null,
+    status_histories: raw.status_history ?? [],
+    started_at: raw.milestones?.started_at ?? null,
+    arrived_at: raw.milestones?.arrived_at ?? null,
+    completed_at: raw.milestones?.completed_at ?? null,
+    cancelled_at: raw.milestones?.cancelled_at ?? null,
+    created_at: raw.created_at,
+    updated_at: raw.updated_at,
+  } as unknown as Ride
+}
+
+/** Normalisasi satu halaman daftar perjalanan. */
+export function normalizeRides(raw: { data?: RideResourceShape[] } | null | undefined): Ride[] {
+  return (raw?.data ?? []).map(normalizeRide)
 }
